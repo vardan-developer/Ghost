@@ -29,4 +29,15 @@ object C2 {
      * at deploy time — change it in this one place only.
      */
     const val ENROLL_KEY = "2f1352f9bb4a082458700b4231b06fdb"
+
+    /**
+     * SHA-256 of the WSS listener certificate's SubjectPublicKeyInfo
+     * (base64, no padding). The device accepts a self-signed certificate only
+     * when it matches one of these pins; publicly trusted CA certificates
+     * are still accepted normally. Reusing this key when renewing the
+     * self-signed certificate keeps existing installs working.
+     */
+    val TLS_SPKI_SHA256 = listOf(
+        "fxpcpM9lnWg3Y8FJH3XscVZXirnCyCU6cj1QkOR2qtw="
+    )
 }

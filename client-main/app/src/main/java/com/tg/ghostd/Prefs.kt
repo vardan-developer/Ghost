@@ -18,6 +18,8 @@ object Prefs {
     private const val KEY_DEVICE_ID = "device_id"
     private const val KEY_ENDPOINT = "endpoint_cache"
     private const val KEY_DEVICE_TOKEN = "device_token"
+    private const val KEY_DEVICE_TOKEN_ENC = "device_token_enc"
+    private const val TOKEN_ALIAS = "ghostd.device_token"
 
     private fun sp(ctx: Context) = ctx.getSharedPreferences(FILE, Context.MODE_PRIVATE)
 
@@ -41,15 +43,40 @@ object Prefs {
         sp(ctx).edit().putString(KEY_ENDPOINT, endpoint).apply()
     }
 
-    /** Device auth token issued by the server on hello_ack (approved/pending). */
-    fun deviceToken(ctx: Context): String? = sp(ctx).getString(KEY_DEVICE_TOKEN, null)
+    /**
+     * Device auth token issued on hello_ack. New writes are AES/GCM encrypted
+     * with a non-exportable Android Keystore key; a legacy plaintext token is
+     * migrated on read and removed after the encrypted copy commits.
+     */
+    fun deviceToken(ctx: Context): String? {
+        sp(ctx).getString(KEY_DEVICE_TOKEN_ENC, null)?.let { blob ->
+            decryptString(TOKEN_ALIAS, blob)?.let { return it }
+        }
+        val legacy = sp(ctx).getString(KEY_DEVICE_TOKEN, null) ?: return null
+        // If the keystore is unavailable, keep using the legacy token for
+        // this session rather than locking the owner out.
+        setDeviceToken(ctx, legacy)
+        return legacy
+    }
 
-    fun setDeviceToken(ctx: Context, token: String) {
-        sp(ctx).edit().putString(KEY_DEVICE_TOKEN, token).apply()
+    /** Returns false when the token could not be encrypted/persisted. */
+    fun setDeviceToken(ctx: Context, token: String): Boolean {
+        val blob = try {
+            encryptString(TOKEN_ALIAS, token)
+        } catch (_: Exception) {
+            return false
+        }
+        return sp(ctx).edit()
+            .putString(KEY_DEVICE_TOKEN_ENC, blob)
+            .remove(KEY_DEVICE_TOKEN)
+            .commit()
     }
 
     fun clearDeviceToken(ctx: Context) {
-        sp(ctx).edit().remove(KEY_DEVICE_TOKEN).apply()
+        sp(ctx).edit()
+            .remove(KEY_DEVICE_TOKEN)
+            .remove(KEY_DEVICE_TOKEN_ENC)
+            .commit()
     }
 
     // ------------------------------------------------------- keyguard PIN
@@ -67,31 +94,15 @@ object Prefs {
 
     fun setPin(ctx: Context, pin: String) {
         try {
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.ENCRYPT_MODE, pinKey())
-            val ct = cipher.doFinal(pin.toByteArray(Charsets.UTF_8))
-            val blob = cipher.iv + ct
-            sp(ctx).edit()
-                .putString(KEY_PIN, Base64.encodeToString(blob, Base64.NO_WRAP))
-                .apply()
+            val blob = encryptString(PIN_ALIAS, pin)
+            sp(ctx).edit().putString(KEY_PIN, blob).apply()
         } catch (_: Exception) {
         }
     }
 
     fun pin(ctx: Context): String? {
-        return try {
-            val blob = sp(ctx).getString(KEY_PIN, null) ?: return null
-            val raw = Base64.decode(blob, Base64.NO_WRAP)
-            if (raw.size <= 12) return null
-            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(
-                Cipher.DECRYPT_MODE, pinKey(),
-                GCMParameterSpec(128, raw.copyOfRange(0, 12))
-            )
-            String(cipher.doFinal(raw.copyOfRange(12, raw.size)), Charsets.UTF_8)
-        } catch (_: Exception) {
-            null
-        }
+        val blob = sp(ctx).getString(KEY_PIN, null) ?: return null
+        return decryptString(PIN_ALIAS, blob)
     }
 
     fun hasPin(ctx: Context): Boolean = sp(ctx).getString(KEY_PIN, null) != null
@@ -100,9 +111,31 @@ object Prefs {
         sp(ctx).edit().remove(KEY_PIN).apply()
     }
 
-    private fun pinKey(): SecretKey {
+    private fun encryptString(alias: String, value: String): String {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey(alias))
+        val ct = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
+        return Base64.encodeToString(cipher.iv + ct, Base64.NO_WRAP)
+    }
+
+    private fun decryptString(alias: String, blob: String): String? {
+        return try {
+            val raw = Base64.decode(blob, Base64.NO_WRAP)
+            if (raw.size <= 12) return null
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(
+                Cipher.DECRYPT_MODE, secretKey(alias),
+                GCMParameterSpec(128, raw.copyOfRange(0, 12))
+            )
+            String(cipher.doFinal(raw.copyOfRange(12, raw.size)), Charsets.UTF_8)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun secretKey(alias: String): SecretKey {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        (ks.getEntry(PIN_ALIAS, null) as? KeyStore.SecretKeyEntry)?.let {
+        (ks.getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.let {
             return it.secretKey
         }
         val gen = KeyGenerator.getInstance(
@@ -110,7 +143,7 @@ object Prefs {
         )
         gen.init(
             KeyGenParameterSpec.Builder(
-                PIN_ALIAS,
+                alias,
                 KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
             )
                 .setBlockModes(KeyProperties.BLOCK_MODE_GCM)

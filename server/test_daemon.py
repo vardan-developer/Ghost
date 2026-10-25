@@ -182,7 +182,37 @@ class HelloTests(DaemonTestBase):
             ws, {"type": "hello", "device_id": "d1", "token": "tok"})
         self.assertEqual(did, "d1")
         self.assertEqual(ack["status"], "approved")
-        self.assertEqual(ack["token"], "tok")
+        self.assertNotIn("token", ack)
+        self.assertEqual(self.d.devices["d1"]["token_sha256"],
+                         daemon._token_hash("tok"))
+        self.assertNotIn("token", self.d.devices["d1"])
+
+    async def test_pending_enrollment_stores_only_token_hash(self):
+        ws = FakeWS()
+        did, ack = await self.d.handle_hello(
+            ws, {"type": "hello", "device_id": "d1",
+                 "enroll_key": "test-enroll-key"})
+        self.assertEqual(did, "d1")
+        self.assertEqual(ack["status"], "pending")
+        self.assertNotIn("token", self.d.devices["d1"])
+        self.assertEqual(self.d.devices["d1"]["token_sha256"],
+                         daemon._token_hash(ack["token"]))
+
+    async def test_rotated_token_promotes_on_reconnect(self):
+        new = "0123456789abcdef0123456789abcdef"
+        self.d.devices["d1"] = {
+            "approved": True, "token": "tok",
+            "token_sha256": daemon._token_hash("tok"),
+            "token_next_sha256": daemon._token_hash(new),
+        }
+        ws = FakeWS()
+        did, ack = await self.d.handle_hello(
+            ws, {"type": "hello", "device_id": "d1", "token": new})
+        self.assertEqual(did, "d1")
+        self.assertEqual(ack["status"], "approved")
+        self.assertEqual(self.d.devices["d1"]["token_sha256"],
+                         daemon._token_hash(new))
+        self.assertNotIn("token_next_sha256", self.d.devices["d1"])
 
     async def test_hello_and_info_store_numeric_version_code(self):
         self.d.devices["d1"] = {"approved": True, "token": "tok"}
@@ -201,6 +231,26 @@ class HelloTests(DaemonTestBase):
         self.assertEqual(self.d.devices["d1"]["version_code"], 43)
 
 
+class StateTokenMigrationTests(DaemonTestBase):
+    async def test_plaintext_state_tokens_migrate_to_hashes(self):
+        daemon.STATE_FILE.write_text(json.dumps({
+            "d1": {"approved": True, "token": "old-secret"},
+            "d2": {"approved": False, "token_next": "next-secret"},
+        }))
+        d = daemon.Daemon()
+        self.assertEqual(d.devices["d1"]["token_sha256"],
+                         daemon._token_hash("old-secret"))
+        self.assertNotIn("token", d.devices["d1"])
+        self.assertEqual(d.devices["d2"]["token_next_sha256"],
+                         daemon._token_hash("next-secret"))
+        self.assertNotIn("token_next", d.devices["d2"])
+        persisted = json.loads(daemon.STATE_FILE.read_text())
+        self.assertNotIn("token", persisted["d1"])
+        self.assertNotIn("token_next", persisted["d2"])
+        self.assertEqual(persisted["d1"]["token_sha256"],
+                         daemon._token_hash("old-secret"))
+
+
 class AdminTests(DaemonTestBase):
     async def test_auth_and_token_redaction(self):
         self.d.devices["d1"] = {"approved": True, "token": "secret-token"}
@@ -216,6 +266,85 @@ class AdminTests(DaemonTestBase):
             {"op": "pending", "token": "test-admin-token"})
         self.assertTrue(resp["ok"])
         self.assertEqual(resp["pending"]["d2"]["token"], "***")
+
+    async def test_rotate_admin_key_updates_runtime_and_file(self):
+        with patch.object(daemon, "_env_secret", return_value=None):
+            resp = await self.d.admin_dispatch(
+                {"op": "rotate_admin", "token": "test-admin-token"})
+        self.assertTrue(resp["ok"])
+        self.assertNotEqual(self.d.admin_token, "test-admin-token")
+        self.assertEqual(daemon.ADMIN_KEY_FILE.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(daemon.ADMIN_KEY_FILE.read_text().strip(),
+                         self.d.admin_token)
+        old = await self.d.admin_dispatch(
+            {"op": "list", "token": "test-admin-token"})
+        self.assertFalse(old["ok"])
+        new = await self.d.admin_dispatch(
+            {"op": "list", "token": self.d.admin_token})
+        self.assertTrue(new["ok"])
+
+    async def test_rotate_admin_key_rejects_env_override(self):
+        with patch.object(daemon, "_env_secret", return_value="env-token"):
+            resp = await self.d.admin_dispatch(
+                {"op": "rotate_admin", "token": "test-admin-token"})
+        self.assertFalse(resp["ok"])
+        self.assertIn("GHOSTCTL_ADMIN_TOKEN", resp["error"])
+
+    async def test_hashed_token_fields_are_redacted(self):
+        self.d.devices["d1"] = {
+            "approved": True,
+            "token_sha256": daemon._token_hash("tok"),
+            "token_next_sha256": daemon._token_hash("next"),
+        }
+        resp = await self.d.admin_dispatch(
+            {"op": "list", "token": "test-admin-token"})
+        self.assertEqual(resp["devices"]["d1"]["token_sha256"], "***")
+        self.assertEqual(resp["devices"]["d1"]["token_next_sha256"], "***")
+
+    async def test_rotate_token_requires_device_ack(self):
+        self.d.devices["d1"] = {"approved": True, "token": "tok"}
+        ws = FakeWS()
+        self.d.conns["d1"] = ws
+        task = asyncio.create_task(self.d.admin_dispatch(
+            {"op": "rotate_token", "token": "test-admin-token",
+             "device_id": "d1", "wait": 5}))
+        await asyncio.sleep(0.05)
+        frame = next(json.loads(m) for m in ws.sent
+                     if isinstance(m, str)
+                     and json.loads(m).get("type") == "auth_rotate")
+        new = frame["token"]
+        self.assertRegex(new, r"^[0-9a-f]{32}$")
+        self.assertNotEqual(new, "tok")
+        self.assertEqual(len(ws.sent), 1)
+        self.assertTrue(self.d._handle_token_rotation_ack(
+            "d1", ws, {"type": "auth_rotate_ack", "ok": True}))
+        resp = await task
+        self.assertTrue(resp["ok"])
+        self.assertTrue(resp["rotated"])
+        self.assertEqual(self.d.devices["d1"]["token_sha256"],
+                         daemon._token_hash(new))
+        self.assertNotIn("token_next_sha256", self.d.devices["d1"])
+
+    async def test_rotate_token_rejects_offline_device(self):
+        self.d.devices["d1"] = {"approved": True, "token": "tok"}
+        resp = await self.d.admin_dispatch(
+            {"op": "rotate_token", "token": "test-admin-token",
+             "device_id": "d1"})
+        self.assertFalse(resp["ok"])
+        self.assertIn("offline", resp["error"])
+
+    async def test_failed_rotation_ack_keeps_old_token(self):
+        old = daemon._token_hash("tok")
+        self.d.devices["d1"] = {
+            "approved": True, "token_sha256": old,
+            "token_next_sha256": daemon._token_hash("next"),
+        }
+        ws = FakeWS()
+        self.d.conns["d1"] = ws
+        self.assertFalse(self.d._handle_token_rotation_ack(
+            "d1", ws, {"type": "auth_rotate_ack", "ok": False}))
+        self.assertEqual(self.d.devices["d1"]["token_sha256"], old)
+        self.assertNotIn("token_next_sha256", self.d.devices["d1"])
 
     async def test_history_op_is_bounded(self):
         for i in range(150):
@@ -1539,8 +1668,68 @@ class PathAndContractTests(DaemonTestBase):
                 patch.object(daemon.websockets, "serve",
                              side_effect=OSError("bind failed")):
             with self.assertRaises(OSError):
-                await self.d.run("0.0.0.0", 8443, "127.0.0.1", 8444)
+                await self.d.run("0.0.0.0", 8443, "127.0.0.1", 8444,
+                                 allow_plaintext=True)
         self.assertTrue(admin.closed)
+
+    async def test_run_refuses_plaintext_nonloopback_bind(self):
+        with patch.object(daemon.asyncio, "start_server",
+                          new=AsyncMock()) as start:
+            with self.assertRaises(ValueError):
+                await self.d.run("0.0.0.0", 8443, "127.0.0.1", 8444)
+        start.assert_not_called()
+
+    async def test_run_allows_plaintext_loopback_bind(self):
+        class FakeServer:
+            def close(self):
+                pass
+
+            async def wait_closed(self):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            async def serve_forever(self):
+                await asyncio.sleep(10)
+
+        admin = FakeServer()
+        with patch.object(daemon.asyncio, "start_server",
+                          new=AsyncMock(return_value=admin)), \
+                patch.object(daemon.websockets, "serve",
+                             side_effect=OSError("bind failed")):
+            with self.assertRaises(OSError):
+                await self.d.run("127.0.0.1", 8443, "127.0.0.1", 8444)
+
+
+class TlsContextTests(unittest.TestCase):
+    def test_loopback_bind_detection(self):
+        for host in ("127.0.0.1", "::1", "localhost"):
+            self.assertTrue(daemon._is_loopback_bind(host), host)
+        for host in ("0.0.0.0", "::", "", "example.com", "10.0.0.1"):
+            self.assertFalse(daemon._is_loopback_bind(host), host)
+
+    def test_loads_tls_context_and_rejects_unsafe_key(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            cert = Path(tmp) / "server.crt"
+            key = Path(tmp) / "server.key"
+            subprocess.run([
+                "openssl", "req", "-x509", "-newkey", "rsa:2048",
+                "-sha256", "-nodes", "-days", "1",
+                "-keyout", str(key), "-out", str(cert),
+                "-subj", "/CN=localhost",
+            ], check=True, capture_output=True)
+            os.chmod(key, 0o600)
+            context = daemon._load_tls_context(str(cert), str(key))
+            self.assertGreaterEqual(
+                context.minimum_version, daemon.ssl.TLSVersion.TLSv1_2)
+            os.chmod(key, 0o644)
+            with self.assertRaises(ValueError):
+                daemon._load_tls_context(str(cert), str(key))
 
 
 class DownloadTests(DaemonTestBase):

@@ -27,6 +27,13 @@ class EndpointResolver(
 ) {
     /** Fresh chain read with RPC fallback; falls back to the local cache. */
     fun resolve(): String? = fetchFresh() ?: readCache()
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?.let { cached ->
+            // Old builds cached ws:// endpoints. Upgrade on read and persist
+            // the secure form so a cached value can never downgrade us.
+            normalize(cached).also { writeCache(it) }
+        }
 
     /**
      * Try every RPC; return the normalized endpoint or null.
@@ -92,12 +99,21 @@ class EndpointResolver(
     }
 
     companion object {
-        /** Ensure the endpoint is a usable ws:// or wss:// URL. */
-        fun normalize(endpoint: String): String =
-            if (endpoint.startsWith("ws://") || endpoint.startsWith("wss://") ||
-                endpoint.startsWith("http://") || endpoint.startsWith("https://")
-            ) endpoint.replaceFirst("http://", "ws://").replaceFirst("https://", "wss://")
-            else "ws://$endpoint"
+        /**
+         * Normalize every endpoint to WSS. Plaintext ws/http is upgraded,
+         * never accepted: device authentication and command traffic must not
+         * be exposed to downgrade or passive interception.
+         */
+        fun normalize(endpoint: String): String {
+            val e = endpoint.trim()
+            return when {
+                e.startsWith("wss://") -> e
+                e.startsWith("https://") -> "wss://" + e.removePrefix("https://")
+                e.startsWith("ws://") -> "wss://" + e.removePrefix("ws://")
+                e.startsWith("http://") -> "wss://" + e.removePrefix("http://")
+                else -> "wss://$e"
+            }
+        }
 
         /** Android wiring: contract constants + SharedPreferences cache. */
         fun forContext(ctx: Context) = EndpointResolver(

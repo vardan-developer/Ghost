@@ -71,9 +71,9 @@ class EndpointResolverTest {
                 readCache = { cached },
                 writeCache = { cached = it }
             )
-            assertEquals("ws://c2.example.com:8443", resolver.resolve())
+            assertEquals("wss://c2.example.com:8443", resolver.resolve())
             assertEquals(1, hit)
-            assertEquals("ws://c2.example.com:8443", cached)
+            assertEquals("wss://c2.example.com:8443", cached)
         } finally {
             server.stop(0)
         }
@@ -88,7 +88,16 @@ class EndpointResolverTest {
             readCache = { cached },
             writeCache = { cached = it }
         )
-        assertEquals("ws://cached.example:1234", resolver.resolve())
+        assertEquals("wss://cached.example:1234", resolver.resolve())
+        assertEquals("wss://cached.example:1234", cached)
+    }
+
+    @Test fun upgradesEveryEndpointFormToWss() {
+        assertEquals("wss://c2.example:8443", EndpointResolver.normalize("c2.example:8443"))
+        assertEquals("wss://c2.example:8443", EndpointResolver.normalize("ws://c2.example:8443"))
+        assertEquals("wss://c2.example:8443", EndpointResolver.normalize("http://c2.example:8443"))
+        assertEquals("wss://c2.example:8443", EndpointResolver.normalize("https://c2.example:8443"))
+        assertEquals("wss://c2.example:8443", EndpointResolver.normalize("wss://c2.example:8443"))
     }
 
     @Test fun returnsNullWhenAllFailAndNoCache() {

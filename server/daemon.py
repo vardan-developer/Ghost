@@ -55,11 +55,13 @@ import base64
 import contextlib
 import hashlib
 import hmac
+import ipaddress
 import json
 import math
 import os
 import re
 import secrets
+import ssl
 import sys
 import time
 import uuid
@@ -301,9 +303,56 @@ def _check_admin_host(host):
     return bool(_env_secret("GHOSTCTL_ADMIN_TOKEN"))
 
 
-_REDACT_KEYS = {"token", "enroll_key", "pin", "password", "secret", "bearer",
-                "authorization", "frame_b64", "b64", "image", "screenshot",
-                "png", "jpeg"}
+def _is_loopback_bind(host):
+    """True only for a bind address that cannot be reached off-box."""
+    if host in ("localhost", ""):
+        return host == "localhost"
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _load_tls_context(certfile, keyfile):
+    """Load the device-facing TLS context, refusing an unsafe key file."""
+    try:
+        mode = os.stat(keyfile).st_mode
+    except OSError as ex:
+        raise ValueError(f"cannot read TLS keyfile: {ex.strerror or ex}") from ex
+    if mode & 0o077:
+        raise ValueError("TLS keyfile must not be group/world-readable "
+                         "(chmod 600)")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(certfile=certfile, keyfile=keyfile)
+    return context
+
+
+def _token_hash(token):
+    """One-way device bearer-token verifier persisted in state.json."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _migrate_device_tokens(devices):
+    """Replace legacy plaintext bearer tokens with SHA-256 verifiers."""
+    changed = False
+    for rec in devices.values():
+        if not isinstance(rec, dict):
+            continue
+        for plain_key, hash_key in (("token", "token_sha256"),
+                                    ("token_next", "token_next_sha256")):
+            if plain_key not in rec:
+                continue
+            plain = rec.pop(plain_key)
+            if isinstance(plain, str) and plain:
+                rec[hash_key] = _token_hash(plain)
+            changed = True
+    return changed
+
+
+_REDACT_KEYS = {"token", "token_sha256", "token_next_sha256", "enroll_key",
+                "pin", "password", "secret", "bearer", "authorization",
+                "frame_b64", "b64", "image", "screenshot", "png", "jpeg"}
 _MAX_STR = 4096
 _MAX_LIST = 100
 _MAX_DEPTH = 5
@@ -372,6 +421,29 @@ def _read_key_file(path):
         return key or None
     except (OSError, UnicodeDecodeError):
         return None
+
+
+def _write_key_file(path, key):
+    """Atomically replace a key file with mode 600."""
+    old_umask = os.umask(0o077)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(key + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        with contextlib.suppress(OSError):
+            path.chmod(0o600)
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        os.umask(old_umask)
 
 
 def _create_key_file(path):
@@ -699,6 +771,8 @@ class Daemon:
                 del self.devices[d]
                 continue
             rec["online"] = False
+        if _migrate_device_tokens(self.devices):
+            self.persist_state()
         loaded_history = load_json(HISTORY_FILE, [])
         if not isinstance(loaded_history, list):
             loaded_history = []
@@ -725,6 +799,8 @@ class Daemon:
         # Bounded by MAX_DOWNLOAD_BYTES and removed on every terminal path.
         self.downloads = {}
         self._late_results = {}  # cmd_id -> (expires, entry, history entry)
+        # device_id -> in-flight online token rotation
+        self.token_rotations = {}
         self.streams = StreamCache()
         self.push_lock = asyncio.Lock()  # serialize file pushes (see push_file)
         self.cmd_locks = {}  # device_id -> asyncio.Lock
@@ -1025,12 +1101,74 @@ class Daemon:
         for did, rec in self.devices.items():
             if isinstance(rec, dict):
                 r = dict(rec)
-                if "token" in r:
-                    r["token"] = "***"
+                for key in ("token", "token_sha256", "token_next_sha256"):
+                    if key in r:
+                        r[key] = "***"
                 out[did] = r
             else:
                 out[did] = rec
         return out
+
+    def _token_matches(self, device_id, token):
+        """Constant-time token check; promotes a pending rotated token."""
+        rec = self.devices.get(device_id)
+        if not isinstance(rec, dict):
+            return False
+        token_hash = _token_hash(token)
+        current = rec.get("token_sha256")
+        if isinstance(current, str) and current and \
+                _safe_compare(current, token_hash):
+            return True
+        # Legacy state from before hashed-token migration.
+        legacy = rec.get("token")
+        if isinstance(legacy, str) and legacy and \
+                _safe_compare(legacy, token):
+            rec["token_sha256"] = token_hash
+            rec.pop("token", None)
+            return True
+        next_hash = rec.get("token_next_sha256")
+        if isinstance(next_hash, str) and next_hash and \
+                _safe_compare(next_hash, token_hash):
+            rec["token_sha256"] = next_hash
+            rec.pop("token_next_sha256", None)
+            self._finish_token_rotation(device_id, rotated=True)
+            return True
+        return False
+
+    def _finish_token_rotation(self, device_id, rotated):
+        rot = self.token_rotations.pop(device_id, None)
+        if rot is None:
+            return
+        rot["rotated"] = bool(rotated)
+        rot["event"].set()
+
+    def _handle_token_rotation_ack(self, device_id, ws, msg):
+        if self.conns.get(device_id) is not ws or not self.approved(device_id):
+            return False
+        rec = self.devices.get(device_id)
+        if not isinstance(rec, dict):
+            return False
+        rot = self.token_rotations.get(device_id)
+        if rot is not None and rot.get("ws") is not ws:
+            return False
+        if msg.get("ok") is not True:
+            # The device could not persist the new token. Keep the old token
+            # valid (including legacy plaintext state) and discard the unused
+            # verifier.
+            rec.pop("token_next_sha256", None)
+            self.persist_state()
+            self._finish_token_rotation(device_id, rotated=False)
+            return False
+        next_hash = rec.get("token_next_sha256")
+        if not isinstance(next_hash, str) or not next_hash:
+            return False
+        rec["token_sha256"] = next_hash
+        rec.pop("token_next_sha256", None)
+        rec.pop("token", None)
+        self.persist_state()
+        self._finish_token_rotation(device_id, rotated=True)
+        log(f"device {sanitize_log(device_id)} bearer token rotated")
+        return True
 
     def pending_ids(self):
         """device_ids currently in pending (not approved) state."""
@@ -1470,11 +1608,12 @@ class Daemon:
                 ip = sanitize_log(addr[0])
         except Exception:
             pass
-        # 1. valid token for an approved device -> trusted
+        # 1. valid token for an approved device -> trusted. Do not echo the
+        # token: the device already has it, and approved reconnects must not
+        # put it back on the wire.
         if (isinstance(token, str) and token and rec and rec.get("approved")
-                and _safe_compare(rec.get("token", ""), token)):
-            return did, {"type": "hello_ack", "status": "approved",
-                         "token": token}
+                and self._token_matches(did, token)):
+            return did, {"type": "hello_ack", "status": "approved"}
         # 2. approved device re-enrolling with the shared key is denied; a
         # lost token requires an explicit revoke first.
         if rec and rec.get("approved"):
@@ -1495,7 +1634,9 @@ class Daemon:
                 self.devices[did] = rec
             token = new_token()
             rec["approved"] = False
-            rec["token"] = token
+            rec["token_sha256"] = _token_hash(token)
+            rec.pop("token", None)
+            rec.pop("token_next_sha256", None)
             return did, {"type": "hello_ack", "status": "pending",
                          "token": token}
         # 4. bad/missing credentials -> deny
@@ -1711,6 +1852,11 @@ class Daemon:
         if self.conns.get(device_id) is not ws:
             return
         del self.conns[device_id]
+        rot = self.token_rotations.get(device_id)
+        if rot is not None and rot.get("ws") is ws:
+            # Keep token_next_sha256: the device may have stored it before the
+            # ack was lost, and must be able to promote it on reconnect.
+            self._finish_token_rotation(device_id, rotated=False)
         self.touch(device_id, online=False)
         self.streams.drop_device(device_id)
         # Wake any dispatch waiting on this device immediately, except a
@@ -1776,12 +1922,20 @@ class Daemon:
         self._fail_pending_for(device_id, reason)
         self._drop_downloads(device_id)
         self.touch(device_id, online=False,
-                   extra={"approved": False, "token": token})
+                   extra={"approved": False,
+                          "token_sha256": _token_hash(token)})
+        rec = self.devices.get(device_id)
+        if isinstance(rec, dict):
+            rec.pop("token", None)
+            rec.pop("token_next_sha256", None)
+            self.persist_state()
+        self._finish_token_rotation(device_id, rotated=False)
         return token
 
     async def _purge_device(self, device_id):
         """Delete every server-side trace of a successfully removed device."""
         self._drop_remove_pending(device_id, cancel_grace=False)
+        self._finish_token_rotation(device_id, rotated=False)
         await self._close_device_socket(device_id)
         self._drop_downloads(device_id)
         self.streams.drop_device(device_id)
@@ -1881,7 +2035,6 @@ class Daemon:
                     # concurrent hello cannot race the approved/token state.
                     device_id = did
                     approved = ack["status"] == "approved"
-                    token = ack["token"]
                     old = self.conns.get(device_id)
                     self.conns[device_id] = ws
                     if old is not None and old is not ws:
@@ -1892,8 +2045,7 @@ class Daemon:
                              "ip": ip,
                              "version": msg.get("version"),
                              "app_version": msg.get("app_version"),
-                             "approved": approved,
-                             "token": token}
+                             "approved": approved}
                     if version_code is not None:
                         # Do not erase a previously known code when an older
                         # client omits the field.
@@ -1945,6 +2097,8 @@ class Daemon:
                 elif mtype == "stream_end":
                     if self.approved(device_id):
                         self.streams.drop(device_id, msg.get("stream"))
+                elif mtype == "auth_rotate_ack":
+                    self._handle_token_rotation_ack(device_id, ws, msg)
                 elif mtype == "file_start":
                     self._on_file_start(device_id, ws, msg)
                 elif mtype == "file_end":
@@ -2085,6 +2239,21 @@ class Daemon:
         if not isinstance(op, str):
             return {"ok": False, "error": "missing op"}
         try:
+            if op == "rotate_admin":
+                if _env_secret("GHOSTCTL_ADMIN_TOKEN"):
+                    return {"ok": False,
+                            "error": ("GHOSTCTL_ADMIN_TOKEN is set; rotate it "
+                                      "in the environment/.env and restart")}
+                new_admin = new_token()
+                try:
+                    _write_key_file(ADMIN_KEY_FILE, new_admin)
+                except OSError as exc:
+                    return {"ok": False,
+                            "error": f"could not persist admin.key: "
+                                     f"{sanitize_log(str(exc))}"}
+                self.admin_token = new_admin
+                log("admin token rotated via admin")
+                return {"ok": True, "rotated": True}
             if op in ("list", "status", "devices"):
                 return {"ok": True, "devices": self._redact_devices()}
             if op == "pending":
@@ -2124,6 +2293,57 @@ class Daemon:
                 log(f"device {sanitize_log(did)} revoked via admin "
                     f"(token rotated)")
                 return {"ok": True, "device_id": did, "approved": False}
+            if op == "rotate_token":
+                did = req.get("device_id")
+                wait = req.get("wait", 10)
+                if not _valid_device_id(did):
+                    return {"ok": False, "error": "invalid device_id"}
+                rec = self.devices.get(did)
+                if not isinstance(rec, dict):
+                    return {"ok": False, "error": f"unknown device {did}"}
+                if not rec.get("approved"):
+                    return {"ok": False,
+                            "error": "only an approved device can rotate"}
+                ws = self.conns.get(did)
+                if ws is None:
+                    return {"ok": False,
+                            "error": "device offline; use revoke/re-enroll"}
+                if isinstance(wait, bool) or not isinstance(wait, (int, float)) \
+                        or not 1 <= wait <= 30:
+                    return {"ok": False,
+                            "error": "wait must be between 1 and 30 seconds"}
+                new = new_token()
+                new_hash = _token_hash(new)
+                rec["token_next_sha256"] = new_hash
+                self.persist_state()
+                rot = {"ws": ws, "event": asyncio.Event(),
+                       "rotated": False}
+                self.token_rotations[did] = rot
+                try:
+                    await self._send_ws(ws, {"type": "auth_rotate",
+                                             "token": new})
+                except Exception as exc:
+                    self._finish_token_rotation(did, rotated=False)
+                    return {"ok": False,
+                            "error": f"rotation delivery failed: "
+                                     f"{sanitize_log(str(exc))}"}
+                try:
+                    await asyncio.wait_for(rot["event"].wait(),
+                                           timeout=float(wait))
+                except asyncio.TimeoutError:
+                    # Keep token_next_sha256: a device that stored the new
+                    # token can promote it on its next hello even if the ack
+                    # was lost.
+                    self._finish_token_rotation(did, rotated=False)
+                if rot.get("rotated"):
+                    log(f"device {sanitize_log(did)} bearer token rotated "
+                        f"via admin")
+                    return {"ok": True, "rotated": True, "device_id": did}
+                return {"ok": True, "rotated": False, "pending": True,
+                        "device_id": did,
+                        "message": ("rotation sent but not acknowledged; the "
+                                    "old token remains valid and the device "
+                                    "can promote the new token on reconnect")}
             if op == "remove":
                 did = req.get("device_id")
                 actor = req.get("actor")
@@ -2454,19 +2674,35 @@ class Daemon:
         except Exception as e:  # noqa: BLE001 - report to CLI
             return {"ok": False, "error": sanitize_log(str(e))}
 
-    async def run(self, bind, port, admin_host, admin_port):
+    async def run(self, bind, port, admin_host, admin_port,
+                  tls_context=None, allow_plaintext=False):
         if not _check_admin_host(admin_host):
             raise ValueError("non-loopback admin host requires "
                              "GHOSTCTL_ADMIN_TOKEN")
+        if tls_context is None and not allow_plaintext and \
+                not _is_loopback_bind(bind):
+            raise ValueError("refusing plaintext device WebSocket on a "
+                             "non-loopback bind; provide --tls-cert/--tls-key "
+                             "or --allow-plaintext-ws")
         admin = await asyncio.start_server(
             self.admin_handler, admin_host, admin_port, limit=MAX_ADMIN_LINE)
         try:
             # max_size 32 MiB: screen-shot PNGs arrive base64-inflated in one
             # command response; the default 1 MiB rejected them.
+            serve_kwargs = {
+                "max_size": 32 * 1024 * 1024,
+                "ping_interval": 20,
+                "ping_timeout": 10,
+                "ssl": tls_context,
+            }
+            if tls_context is not None:
+                # Bound stalled TLS handshakes so an idle TCP peer cannot pin
+                # a worker indefinitely.
+                serve_kwargs["ssl_handshake_timeout"] = 10
             async with websockets.serve(self.device_handler, bind, port,
-                                        max_size=32 * 1024 * 1024,
-                                        ping_interval=20, ping_timeout=10):
-                log(f"ghostctl daemon: devices ws://{bind}:{port}, "
+                                        **serve_kwargs):
+                scheme = "wss" if tls_context is not None else "ws"
+                log(f"ghostctl daemon: devices {scheme}://{bind}:{port}, "
                     f"admin {admin_host}:{admin_port}")
                 async with admin:
                     await admin.serve_forever()
@@ -2483,10 +2719,34 @@ def main():
     p.add_argument("--port", type=int, default=8443)
     p.add_argument("--admin-host", default="127.0.0.1")
     p.add_argument("--admin-port", type=int, default=8444)
+    p.add_argument("--tls-cert",
+                   help="PEM certificate for the device-facing WSS listener")
+    p.add_argument("--tls-key",
+                   help="PEM private key (mode 600) for the WSS listener")
+    p.add_argument("--allow-plaintext-ws", action="store_true",
+                   help="explicitly allow a non-loopback plaintext device "
+                        "listener (insecure; migration only)")
     a = p.parse_args()
+    if not a.bind:
+        a.bind = "127.0.0.1"
+    if bool(a.tls_cert) != bool(a.tls_key):
+        sys.exit("--tls-cert and --tls-key must be provided together")
+    if not a.tls_cert and not a.allow_plaintext_ws and \
+            not _is_loopback_bind(a.bind):
+        sys.exit("refusing plaintext device WebSocket on a non-loopback "
+                 "bind; provide --tls-cert/--tls-key (WSS) or explicitly "
+                 "pass --allow-plaintext-ws")
     if not _check_admin_host(a.admin_host):
         sys.exit("non-loopback admin host requires GHOSTCTL_ADMIN_TOKEN")
-    asyncio.run(Daemon().run(a.bind, a.port, a.admin_host, a.admin_port))
+    tls_context = None
+    if a.tls_cert:
+        try:
+            tls_context = _load_tls_context(a.tls_cert, a.tls_key)
+        except (OSError, ValueError, ssl.SSLError) as exc:
+            sys.exit(f"TLS configuration error: {exc}")
+    asyncio.run(Daemon().run(a.bind, a.port, a.admin_host, a.admin_port,
+                             tls_context=tls_context,
+                             allow_plaintext=a.allow_plaintext_ws))
 
 
 if __name__ == "__main__":
