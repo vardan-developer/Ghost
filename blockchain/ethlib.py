@@ -186,11 +186,14 @@ class RPC:
         }).encode()
         req = urllib.request.Request(
             self.url, data=payload,
-            headers={"Content-Type": "application/json"})
+            headers={"Content-Type": "application/json",
+                     "User-Agent": "ghostctl/0.2"})
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
             resp = json.loads(r.read())
-        if "error" in resp:
+        if resp.get("error"):
             raise RuntimeError(f"RPC error from {self.url}: {resp['error']}")
+        if "result" not in resp:
+            raise RuntimeError(f"RPC bad response from {self.url}: {resp}")
         return resp["result"]
 
 
