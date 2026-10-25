@@ -111,15 +111,19 @@ class GhostService : Service() {
         while (running) {
             val endpoint = try {
                 resolver.resolve()
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                android.util.Log.w("ghostd", "endpoint resolve threw: ${e.message}")
                 null
             }
             if (endpoint == null) {
                 // All RPCs failed and no cached endpoint: retry in 60s.
+                android.util.Log.w("ghostd", "no endpoint (all RPCs failed, no cache); retry in 60s")
                 if (!sleepQuietly(60_000L)) return
                 continue
             }
+            android.util.Log.i("ghostd", "resolved endpoint: $endpoint")
             val connectedOk = connect(endpoint)
+            android.util.Log.i("ghostd", "connection ended, ok=$connectedOk, retry in ${backoff / 1000}s")
             if (!running) return
             backoff = if (connectedOk) 5_000L else minOf(backoff * 2, 60_000L)
             if (!sleepQuietly(backoff)) return
@@ -138,6 +142,7 @@ class GhostService : Service() {
                 override fun onConnected(
                     websocket: WebSocket, headers: Map<String, List<String>>
                 ) {
+                    android.util.Log.i("ghostd", "WS connected to ${websocket.uri}")
                     connected = true
                     websocket.sendText(registerMessage())
                     startHeartbeat(websocket)
@@ -161,6 +166,7 @@ class GhostService : Service() {
                 }
 
                 override fun onConnectError(websocket: WebSocket, cause: WebSocketException) {
+                    android.util.Log.w("ghostd", "WS connect error: ${cause.message}")
                     stopHeartbeat()
                     latch.countDown()
                 }
