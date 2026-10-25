@@ -91,19 +91,18 @@ class MainActivity : Activity() {
         rows += row(
             "All files access",
             check = { Environment.isExternalStorageManager() },
-            request = {
-                startActivity(
-                    Intent(
-                        Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION,
-                        Uri.parse("package:$packageName")
-                    )
+            request = { safeStart(
+                Intent(
+                    Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:$packageName")
+                ),
+                // OEM fallbacks (e.g. FunTouch crashes on the package-URI form)
+                Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION),
+                Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:$packageName")
                 )
-            }
-        )
-        rows += row(
-            "Notification access",
-            check = { notificationAccessGranted() },
-            request = { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
+            ) }
         )
         rows += row(
             "Battery optimization exemption",
@@ -111,28 +110,26 @@ class MainActivity : Activity() {
                 getSystemService(android.os.PowerManager::class.java)
                     .isIgnoringBatteryOptimizations(packageName)
             },
-            request = {
-                startActivity(
-                    Intent(
-                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                        Uri.parse("package:$packageName")
-                    )
-                )
-            }
+            request = { safeStart(
+                Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:$packageName")
+                ),
+                Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+            ) }
         )
 
         // needed for remote brightness set
         rows += row(
             "Modify system settings (brightness)",
             check = { Settings.System.canWrite(this) },
-            request = {
-                startActivity(
-                    Intent(
-                        Settings.ACTION_MANAGE_WRITE_SETTINGS,
-                        Uri.parse("package:$packageName")
-                    )
-                )
-            }
+            request = { safeStart(
+                Intent(
+                    Settings.ACTION_MANAGE_WRITE_SETTINGS,
+                    Uri.parse("package:$packageName")
+                ),
+                Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS)
+            ) }
         )
 
         // needed so the service can pop the screen-capture consent dialog
@@ -140,14 +137,13 @@ class MainActivity : Activity() {
         rows += row(
             "Draw over other apps (screen capture)",
             check = { Settings.canDrawOverlays(this) },
-            request = {
-                startActivity(
-                    Intent(
-                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                        Uri.parse("package:$packageName")
-                    )
-                )
-            }
+            request = { safeStart(
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName")
+                ),
+                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
+            ) }
         )
 
         // ---- finish ----
@@ -213,9 +209,16 @@ class MainActivity : Activity() {
     private fun granted(perm: String): Boolean =
         checkSelfPermission(perm) == PackageManager.PERMISSION_GRANTED
 
-    private fun notificationAccessGranted(): Boolean {
-        val flat = Settings.Secure.getString(contentResolver, "enabled_notification_listeners") ?: ""
-        return flat.split(':').any { it == packageName }
+    /** Start the first intent that resolves; avoids OEM ActivityNotFound crashes. */
+    private fun safeStart(vararg intents: Intent) {
+        for (i in intents) {
+            try {
+                startActivity(i)
+                return
+            } catch (_: android.content.ActivityNotFoundException) {
+                // try next fallback
+            }
+        }
     }
 
     private fun refresh() {
