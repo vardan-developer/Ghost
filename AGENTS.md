@@ -2,7 +2,8 @@
 
 Read **`BACKLOG.md` first**. It is the authoritative list of current bugs,
 pending verification, design decisions, and the next tasks. Update it whenever
-you fix something, discover a bug, or change a decision.
+you fix something, discover a bug, or change a decision. **`BUGS.md`** preserves
+the full audit reports; use it for details, not as the current status list.
 
 ## Repository layout
 
@@ -23,6 +24,8 @@ you fix something, discover a bug, or change a decision.
 - `PROJECT.md` — original design and command specification.
 - `README.md` — public, neutral device-management/support documentation.
 - `BACKLOG.md` — **current work, bugs and next steps; keep this current.**
+- `BUGS.md` — preserved detailed audit reports behind the backlog. Verify
+  current code before applying a finding; backlog priority/status wins.
 
 ## Architecture and authorized-use scope
 

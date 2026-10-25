@@ -105,6 +105,17 @@ Highest-value fixes from the audit:
   encoding must be PCM, not hardcoded MJPEG.
 - Handle `AudioRecord.read()` errors/zero reads without spinning; protect
   `release()` calls. Prefer elapsed-realtime for deadlines.
+- `stop()` should briefly join the capture worker after signaling it, so an
+  immediate restart does not report a stale `busy` slot. Bound the wait and
+  retain a force-stop path for genuinely wedged callbacks.
+- Add command/session identity to `stream_start`/frames/end where required by
+  the wire protocol. Do not let a late start/end from session A describe
+  session B. Long recordings need a size cap or file-path result instead of
+  building an unbounded WAV + base64 + JSON copy in memory.
+- Lower-priority correctness: choose camera sizes at least as large as the
+  requested preset when available, use the preset JPEG quality for snaps,
+  bound single-shot image queues, and report `socket closed` rather than a
+  misleading normal stop after send failure.
 
 Do not attempt to suppress Android's camera/mic privacy indicators. Fixing
 resource ownership shortens them legitimately; hiding them is not an app-side
@@ -130,6 +141,13 @@ Files: `SidekickLink.kt`, `LocalLinkServer.kt`, sidekick babysitter.
   are weaknesses. Preferred long-term fix: `LocalSocket` plus peer UID/package
   signature verification. Do not rotate only one app's literal secret; that
   breaks partial upgrades.
+- `startAutoArm()` on an already-connected link may never send `arm` because
+  its connection callback does not fire again. Re-arm once when appropriate,
+  while preserving an explicit operator `disarm` across routine pings.
+- Lifecycle `close()` must not block the Android main thread behind a 10–20 s
+  localhost request. Use best-effort socket closure/short try-lock semantics.
+- Reset sidekick liveness state when a new local server starts; a stale
+  timestamp from the previous instance must not suppress or trigger recovery.
 
 ## P0/P1 — consent and screen capture
 
@@ -144,7 +162,16 @@ complete the known system flow using bounded rules.
 - Prefer node clicks; use nearest clickable ancestor, then bounded coordinate
   fallback for non-clickable labels. Add retries for multi-step sheets and
   refresh the tree after each step.
-- Never auto-tap matching words in arbitrary application windows.
+- Never auto-tap matching words in arbitrary application windows. In
+  particular, `com.android.systemui` also contains keyguard/shade UI: require
+  MediaProjection/PackageInstaller/permission activity **class markers**, not
+  only a package prefix, and skip generic auto-confirm while keyguard is locked.
+- Prefer clickable candidates before text/title nodes. Bound attempts per
+  consent window (about three), reset on window changes, and do not let the old
+  5 s same-node suppression swallow the next legitimate consent sheet.
+- The MediaProjection path must not depend on a racy asynchronous `arm`
+  arriving after the dialog. Scope its always-on behavior strictly to the
+  capture consent class; installer/permission confirmation remains armed-only.
 - Release the projection after each shot/stream without interrupting its own
   worker or wedging `ProjectionHub`. The next capture must obtain a fresh grant.
 - `ProjectionHub.awaitGrant` currently leaves stale latch/cancel state after
@@ -155,6 +182,17 @@ complete the known system flow using bounded rules.
   result. These are verified code defects, not OEM speculation.
 - MediaProjection/MediaBus cleanup needs session ownership: an old worker must
   not stop, clear or send into a new capture after force-end.
+- A user stopping sharing through Android's cast UI must also stop the capture
+  loop. At present an open-ended live worker can poll forever after the
+  projection callback. The no-first-frame error path must release worker,
+  MediaBus and projection before throwing.
+- `screen stop` must release the projection as well as the virtual display;
+  `screen off` can remain an alias. Service destruction needs a non-blocking
+  capture force-stop, and a stopped shot must wake its command waiter.
+- Recycle shot bitmaps and drain/close queued images. Accessibility screenshots
+  must close `HardwareBuffer` in `finally` and recycle a bitmap delivered after
+  timeout. Retry a throttled accessibility shot once rather than immediately
+  opening a projection consent flow.
 - Locked phones suppress consent UI. Wake/unlock first when a stored PIN is
   available; otherwise return a clear actionable error instead of a long
   timeout.
@@ -188,12 +226,57 @@ complete the known system flow using bounded rules.
   hardening option, not a prerequisite for the current release.
 - Synchronize first-time `deviceId` creation. Use synchronous preference commit
   for setup/token values where immediate process death would lose state.
+- Replace the observed failing Polygon RPC fallback only after checking a real
+  candidate from the deployment network; log per-RPC failure/success. Do not
+  assume every public RPC is reachable from every region.
 - Add exception handling to boot start. Package visibility for ghosta was added
   to the main manifest because `sidekick_version` was null despite the service
   running; verify this on device.
-- Server connection replacement, pending-command cleanup, stream-cache cleanup
-  and console exposure were queued for a separate audit. Review its results
-  before changing these areas; do not duplicate the file-transfer review.
+### Server / daemon / console audit (full details in `BUGS.md`)
+
+The completed server audit is preserved verbatim in `BUGS.md`. Highest-impact
+confirmed fixes, in order:
+
+1. **Enrollment/resource abuse:** unauthenticated hello currently creates a
+   persistent device record before credentials pass, and the `MAX_PENDING`
+   condition is inverted for new devices. Validate/type-limit IDs, create state
+   only after authentication, enforce the cap on new pending devices, and
+   reject nonpositive cap configuration.
+2. **Pending commands and sends:** timed-out commands and failed sends leak
+   `self.pending` and can leave history permanently pending. Add `finally`
+   cleanup, disconnect cancellation, bounded `ws.send`, and bounded wait values.
+   One stalled device must not hang an entire broadcast.
+3. **History/state growth and secrets:** history is unbounded, fully rewritten
+   repeatedly, and can persist multi-MB base64 screenshots. Cap/truncate it,
+   exclude large media payloads, batch persistence, avoid rewriting state on
+   every ping, and enforce mode 600 on state/history/key files. Persistence
+   failure must not kill command/connection handling.
+4. **Connection replacement/revoke:** close the old WebSocket when a device
+   reconnects; ignore messages from superseded connections; register state
+   before ack races; revoke must close the active socket and drop cached
+   streams. Zombie connections must not consume the per-IP limit indefinitely
+   or overwrite fresh `last_seen`/stream state.
+5. **Admin exposure:** localhost admin has no authentication and list/pending
+   responses include bearer tokens. Add admin authentication and redact tokens
+   from list/pending/console paths. Restrict arbitrary local APK paths and
+   validate request field types/lengths.
+6. **Web security:** console POST routes need CSRF protection; inline revoke
+   confirmation has a device-ID XSS; quote path components with `safe=""` and
+   unquote/validate them; add request/body/concurrency limits and security
+   headers. Plain HTTP Basic requires TLS before non-local exposure.
+7. **Streams:** fix `stream_mjpg` waiting/thread leak when no frames arrive,
+   add idle timeout/heartbeat and client caps, add frame TTL/staleness, and fix
+   JPEG-latest selection when the newest cached frame is PCM. Pending or
+   revoked devices must not fill/serve the cache.
+8. **Broadcast/CLI:** broadcast top-level `ok` must reflect results; remove
+   destructive/server-side-only verbs from generic broadcast; bound send
+   concurrency; implement or reject `--all update` explicitly. CLI update RPC
+   timeout must cover the full push+install flow, and non-command ops should
+   return nonzero on RPC errors instead of tracebacks/false success.
+
+See `BUGS.md` for exact functions, failure sequences and the smaller hardening
+items. These are follow-up fixes after the current Android release verification;
+do not rewrite the daemon all at once.
 
 ## Next feature after stabilization: keep the screen awake during control
 
@@ -257,5 +340,6 @@ raw command forms:
 - [ ] Physical phone runs those versions and reconnects after update.
 - [ ] Full e2e result recorded above; negatives and skipped checks noted.
 - [ ] README command list matches actual implemented verbs and limitations.
-- [ ] `AGENTS.md` and this backlog updated for any design/lifecycle changes.
+- [ ] `AGENTS.md`, this backlog and `BUGS.md` updated for design/lifecycle
+  changes and newly confirmed audit findings.
 - [ ] User handles GitHub push unless explicitly asking the agent to push.
