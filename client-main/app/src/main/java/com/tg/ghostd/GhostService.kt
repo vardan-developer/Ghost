@@ -30,6 +30,12 @@ class GhostService : Service() {
     private var worker: Thread? = null
     private var heartbeat: Timer? = null
 
+    /** Latch of the in-flight connect(): the watchdog counts it down directly
+     *  when the connection looks dead — ws.disconnect() alone is NOT enough,
+     *  it can throw on a half-open socket and leave the runLoop parked in
+     *  latch.await() forever (seen live after airplane mode). */
+    @Volatile private var forceLatch: CountDownLatch? = null
+
     /** Wall-clock (elapsedRealtime) of the last inbound WS traffic. The
      *  heartbeat watchdog force-disconnects when this goes stale — without
      *  it, a half-open TCP connection (server died without RST reaching us)
@@ -139,9 +145,11 @@ class GhostService : Service() {
     private fun connect(endpoint: String): Boolean {
         var connected = false
         var denied = false
+        var ws: com.neovisionaries.ws.client.WebSocket? = null
         try {
             val latch = CountDownLatch(1)
-            val ws = WebSocketFactory()
+            forceLatch = latch
+            ws = WebSocketFactory()
                 .setConnectionTimeout(10_000)
                 .createSocket(URI(endpoint))
             ws.addListener(object : WebSocketAdapter() {
@@ -192,6 +200,14 @@ class GhostService : Service() {
             latch.await()
         } catch (_: Exception) {
             stopHeartbeat()
+        } finally {
+            forceLatch = null
+            // best-effort teardown of a possibly half-open socket; the runLoop
+            // is awake now regardless (watchdog counts the latch down itself)
+            try {
+                ws?.disconnect()
+            } catch (_: Exception) {
+            }
         }
         // denied keeps the exponential backoff growing (retry later, no tight loop)
         return connected && !denied
@@ -265,6 +281,7 @@ class GhostService : Service() {
                         // the reconnect loop wakes up (previously this was
                         // swallowed and nobody noticed a dead connection)
                         android.util.Log.w("ghostd", "heartbeat send failed: ${e.message}")
+                        forceLatch?.countDown()
                         try { ws.disconnect() } catch (_: Exception) {}
                         return
                     }
@@ -272,9 +289,12 @@ class GhostService : Service() {
                     if (idle > HEARTBEAT_MS * 3) {
                         // half-open connection: server gone, TCP never told us.
                         // The daemon answers every ping with {"type":"pong"}, so
-                        // a healthy connection never idles this long.
+                        // a healthy connection never idles this long. Wake the
+                        // runLoop DIRECTLY — ws.disconnect() can throw on a
+                        // half-open socket and was seen leaving the loop parked.
                         android.util.Log.w(
                             "ghostd", "no inbound for ${idle / 1000}s — forcing reconnect")
+                        forceLatch?.countDown()
                         try { ws.disconnect() } catch (_: Exception) {}
                     }
                 }
