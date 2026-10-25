@@ -65,8 +65,8 @@ last good endpoint survives temporary network problems.
   redacted in logs and outputs.
 - The web console uses HTTP Basic auth, CSRF protection for state-changing
   routes, and secure password handling. It binds to localhost by default and
-  refuses non-loopback HTTP unless explicitly overridden; use TLS for remote
-  access.
+  supports native HTTPS with `--certfile`/`--keyfile`. Non-loopback HTTP is
+  refused unless explicitly overridden; use HTTPS for remote access.
 
 ---
 
@@ -83,7 +83,8 @@ cat .env
 #   GHOST_MAX_PER_IP=5
 
 python3 daemon.py          # devices ws://0.0.0.0:8443, admin 127.0.0.1:8444
-python3 console.py --host 0.0.0.0   # web console on :9443 (prints a password)
+python3 console.py --host 0.0.0.0 --certfile console.crt --keyfile console.key
+# web console on https://0.0.0.0:9443 (password from .env / console.pass)
 ```
 
 Open the firewall for the device port (8443/tcp) and the console port if you
@@ -119,10 +120,20 @@ Everything outputs JSON (scriptable); `--pretty` for humans.
 
 ### Web console (`server/console.py`)
 
-A password-protected, CSRF-protected operator dashboard on :9443. It includes
-device cards, per-device command forms, live MJPEG streams, settings for flood
-caps, file upload/download, and device removal without a second confirmation.
-Non-loopback HTTP is refused unless explicitly overridden; use TLS for remote access.
+A password-protected, CSRF-protected operator dashboard on :9443. The UI is
+responsive and includes device cards with model/version/battery/IP/last-seen,
+search/filter and pending approvals; grouped Files, Screen, UI, Media and
+System actions; readable history/results; live-screen start/stop with frame-age
+health; upload/download progress and abort; flood-cap settings; and Remove
+Device without a second confirmation. It also has token redaction, CSP,
+request limits and stream tokens. Native HTTPS is available with
+`--certfile`/`--keyfile`; non-loopback HTTP is refused unless explicitly
+overridden. For an IP-only host, use a self-signed certificate and trust it
+once in the browser (or put the console behind a CA-issued TLS proxy).
+
+The CSRF token is scoped to the running console process. After a console
+restart (or an HTTP-to-HTTPS switch), reload the login/page once; posting from
+an old tab can show `CSRF check failed` even though the password is correct.
 
 ---
 
@@ -172,8 +183,9 @@ moves; do not rely on old chat history for repository state.
   while the network is up, it restarts itself with fresh threads.
 - **Babysitter**: ghosta tracks ghostd's localhost heartbeat beacon and
   restarts it if it goes silent for 15 minutes.
-- **Restart after update**: `MY_PACKAGE_REPLACED` receiver brings the
-  service back after every silent OTA update.
+- **Restart after update**: `MY_PACKAGE_REPLACED` receiver is implemented for
+  package replacement. Actual OTA still depends on Android install eligibility
+  and Play Protect verification; it is not guaranteed or fleet-ready.
 - **File pushes are serialized** and path-verified end to end (SHA-256 +
   size checked on the device; cross-path chunks are ignored).
 
@@ -184,11 +196,22 @@ moves; do not rely on old chat history for repository state.
 - `client-sidekick`: `gradle test` (115 unit tests — command router, tree,
   consent, link, unlock and removal state machines).
 - `server`: `python3 -m py_compile daemon.py ghostctl.py console.py e2e_test.py`
-  and 247 unit tests pass.
+  and 249 unit tests pass, including native TLS wrapping and CSRF-origin tests.
 - Release builds pass. On the emulator, full E2E is 29/29 and unlock,
-  per-capture consent, reboot recovery and two-app removal pass. OTA has a
-  platform limitation: ghostd self-update was blocked by Play Protect
-  verification; do not bypass it.
+  per-capture consent, reboot recovery and two-app removal pass.
+
+### Remaining work
+
+- **OTA:** ghosta installed after a command timeout; ghostd self-update was
+  blocked by Play Protect verification. Fleet OTA is not ready; do not bypass
+  Play Protect.
+- **Transport:** the console runs native HTTPS on Kali, but with a self-signed
+  IP certificate; swap in a CA-issued certificate and rotate credentials after
+  deployment. Device transport still needs TLS/WSS.
+- **Hardening:** older camera/mic resource ownership, endpoint cache/reconnect,
+  localhost peer authentication and approved-device pagination/caps.
+- **Features:** SMS send, contacts, call-log readers and WhatsApp export are
+  not implemented. A real phone-sized console review is pending.
 
 ## Repository layout
 

@@ -10,23 +10,22 @@ Last updated: 2026-10-26.
 
 - Physical test phone: **Pixel 10a**, approved and controllable. It must remain untouched during current local/emulator work.
 - Phone currently reports **ghostd 0.3.8**. Working tree is **ghostd 0.4.1 / ghosta 0.2.1**.
-- **Local full verification now passes:** 247 server unit tests + `py_compile`, 154 ghostd unit tests, 115 ghosta unit tests, and release builds.
+- **Local full verification now passes:** 249 server unit tests + `py_compile`, 154 ghostd unit tests, 115 ghosta unit tests, and release builds.
 - **Emulator:** Runs 0.4.1/0.2.1. Full E2E is **29/29 ALL GREEN**. Stored-PIN
   unlock, locked-screen consent, fresh grants, reboot recovery and two-app
   Remove Device also passed. The emulator was restored to an approved,
   working state after the removal test.
-- **Kali server:** Updated and daemon/console restarted successfully.
+- **Kali server:** Updated. Daemon runs normally; the console runs native HTTPS
+  on :9443 with a self-signed IP certificate. Plain HTTP is no longer enabled.
 - The original e2e run passed 17/22 checks. Failures were:
   - incorrect test invocation for volume (test fixed to `volume set media N`);
   - interrupted/wedged file push and dependent file get;
   - camera blocked by the phone's global camera-access policy;
   - live screen produced no cached frames after projection consent/reuse failed.
-- New `device info`, `status`, `sms recent`, `loc once`, `hide`, `unhide`,
-  `files abort`, and `restart` verbs exist in the working tree, but most still
-  need on-device verification. `sms recent` is implemented, **not yet proven**
-  on the Pixel. SMS send, contacts and call-log readers remain unimplemented.
-  Remove Device is implemented in source but its two-app uninstall flow still
-  needs emulator verification.
+- `device info`, `status`, `sms recent`, `loc once`, `hide`, `unhide`,
+  `files abort` and `restart` passed on the emulator. `sms recent` is not yet
+  proven on the Pixel. SMS send, contacts and call-log readers remain
+  unimplemented. Remove Device passed the complete two-app uninstall flow.
 - Console is implemented with dashboard, settings, file management, CSRF
   protection, admin auth, and secure password handling. Password comes
   from gitignored `server/.env`; never commit it.
@@ -41,15 +40,16 @@ Last updated: 2026-10-26.
    reader and worker on stop/timeout).
 3. Replace localhost shared-secret-only peer trust with LocalSocket + peer UID
    and package-signature validation without breaking partial upgrades.
-4. Deploy device-transport TLS before changing clients to `wss://`; rotate
-   exposed credentials afterward.
+4. Replace the console's self-signed IP certificate with a CA-issued one and
+   rotate credentials. Deploy device-transport TLS before changing clients to
+   `wss://`, then rotate exposed device credentials.
 5. OTA limitation is verified: ghosta installed but its command timed out;
    ghostd self-update was blocked by Play Protect verification. Do not bypass
    that protection or claim unattended fleet OTA is ready.
 
 ## P0 — correctness / recovery bugs
 
-### File transfer races (implemented in working tree; device verification pending)
+### File transfer races (implemented and emulator-verified)
 
 Files: `FileReceiver.kt`, `CommandHandler.kt`, `GhostService.kt`,
 `server/daemon.py`, `FileReceiverTest.kt`.
@@ -275,9 +275,10 @@ confirmed fixes, in order:
    return nonzero on RPC errors instead of tracebacks/false success.
 
 See `BUGS.md` for exact functions and failure sequences. These server/console/
-CLI fixes are now implemented and unit-tested locally; Kali deployment and
-integration verification remain pending. TLS, production permissions and the
-explicitly listed hardening gaps remain open.
+CLI fixes are implemented, unit-tested and deployed on Kali. Integration
+verification passed on the emulator. The console now runs native HTTPS, but its
+IP certificate is self-signed; device-transport TLS, production permissions and
+the explicitly listed hardening gaps remain open.
 
 ## Keep the screen awake during control — source implemented
 
@@ -353,9 +354,11 @@ installed ghosta after a timeout, while ghostd was blocked by Play Protect.**
 The permission in a new APK does not retroactively grant it to the old
 installer process; the transition from an older installation may still need
 one owner-confirmed update. Android can require user action when eligibility
-conditions are not met. No new build, installation or phone command was run.
+conditions are not met.
 
-New findings (U1–U8 in `BUGS.md` have evidence, locations and acceptance checks; source is now addressed and unit-tested, but emulator verification is pending):
+U1–U8 are addressed in source and unit-tested. Reboot recovery, installer
+package/version checks and daemon reconciliation passed their targeted tests;
+the actual ghostd OTA attempt remains blocked by Play Protect verification:
 
 - **U1 / P1 — self-update completion is lost across process replacement.**
   `AppUpdater` waits on a dynamically registered receiver in the process being
@@ -388,18 +391,11 @@ New findings (U1–U8 in `BUGS.md` have evidence, locations and acceptance check
   `BOOT_COMPLETED` starts the dataSync FGS directly. Catching the exception alone
   does not restore connectivity; use and verify a supported recovery path.
 
-Verification this review: mocked current CLI confirmed update alias resolution
-and explicit bulk-update rejection; XML parsing confirmed the permission;
-isolated execution of actual daemon dispatch/disconnect methods reproduced an
-update error despite simulated reconnect/new-version state. Android findings
-are static code + official platform-documentation checks, not on-device proof.
-
-Before marking unattended updates verified: owner-approved test upgrades of
-both packages using the intended signing identity; confirm eligible installs
-need no dialog, correct versionCode after reconnect, accurate failure reporting,
-session isolation, failed-stage cleanup, and reachability after reboot and the
-Android 15+ background runtime limit. This is a verification gate, not approval
-to start new fleet features during release stabilization.
+Verification: ghosta 0.2.1 reached the installed state after its command
+timed out. ghostd 0.4.1 returned an accurate
+`INSTALL_FAILED_VERIFICATION_FAILURE` instead of false success. Reboot recovery
+and versioned daemon reconciliation passed. Fleet OTA remains **not ready**;
+do not bypass Play Protect or treat these tests as a successful self-update.
 
 - Verify `sms recent [N]` and its permission/error path on the Pixel. SMS send
   is not implemented. Contacts and call-log readers are not implemented.
@@ -416,11 +412,13 @@ to start new fleet features during release stabilization.
 
 ## Web console status (implemented and deployed)
 
-The console has been redesigned as an operator dashboard with device cards,
-search/filter, grouped actions, settings, file management, and safe remove.
-It includes CSRF protection, password handling, admin auth, and non-loopback HTTP
-refusal unless overridden. Verify on a phone-sized viewport and desktop, and
-ensure no credentials leak in history or logs.
+The console is redesigned and deployed as an operator dashboard. Kali serves
+HTTPS and returns HTTP 200 over TLS, route/API tests pass, and
+dashboard/device/settings/remove smoke checks passed. Security includes admin
+auth, token redaction, HTTP Basic over TLS, CSRF (including `Origin: null` only
+with a valid token), request limits, CSP and stream tokens. Native TLS supports
+`--certfile`/`--keyfile`. Remaining: trust a CA-issued certificate instead of
+the self-signed IP certificate and review on a real phone-sized browser.
 
 Implemented features:
 
@@ -437,9 +435,9 @@ Implemented features:
 - Settings page for enrollment flood caps and console preferences, using the
   existing daemon config API. Preserve HTTP Basic authentication and CSRF
   protection for state-changing routes.
-- Keep the implementation simple (small server-rendered pages plus vanilla JS
-  unless a framework is genuinely justified). Add route/API tests and verify
-  the console on a phone-sized viewport as well as desktop.
+- Implementation stays small: server-rendered pages plus vanilla JS, with no
+  framework or CDN. Route/API tests are done; a real phone-sized browser and
+  desktop accessibility review remains.
 
 ## Documentation / release checklist
 

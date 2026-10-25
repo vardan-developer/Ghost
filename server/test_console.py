@@ -9,6 +9,7 @@ import os
 import sys
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
@@ -173,6 +174,17 @@ class TestConsole(unittest.TestCase):
                 headers={"Origin": f"http://127.0.0.1:{self.port}"})
             self.assertEqual(status, 200)
 
+    def test_csrf_null_origin_requires_valid_token(self):
+        with patch("console._rpc", return_value={"ok": True}):
+            status, _, _ = self.request(
+                "POST", "/device/abc/approve", body=f"csrf_token={TEST_CSRF}",
+                headers={"Origin": "null"})
+            self.assertEqual(status, 200)
+            status, _, _ = self.request(
+                "POST", "/device/abc/approve", body="csrf_token=wrong",
+                headers={"Origin": "null"})
+            self.assertEqual(status, 403)
+
     def test_csrf_stale_cookie_is_refreshed(self):
         # A restart changes CSRF_TOKEN; a stale cookie must not pin the
         # browser to the old value or force a permanent 403 loop.
@@ -197,6 +209,17 @@ class TestConsole(unittest.TestCase):
                 "POST", "/device/abc/approve", body=f"csrf_token={TEST_CSRF}",
                 headers={"Origin": f"http://127.0.0.1:{self.port}"})
         self.assertEqual(status, 200)
+
+    def test_native_tls_wraps_socket(self):
+        ctx = SimpleNamespace(
+            load_cert_chain=lambda certfile, keyfile: None,
+            wrap_socket=lambda sock, server_side: "wrapped")
+        server = SimpleNamespace(socket=object())
+        with patch("console.ssl.create_default_context", return_value=ctx) as factory:
+            scheme = console.enable_tls(server, "cert.pem", "key.pem")
+        self.assertEqual(scheme, "https")
+        self.assertEqual(server.socket, "wrapped")
+        factory.assert_called_once()
 
     # ------------------------------------------------------ path / xss ----
     def test_path_injection(self):

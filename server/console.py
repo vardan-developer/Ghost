@@ -32,6 +32,7 @@ import json
 import os
 import re
 import secrets
+import ssl
 import sys
 import threading
 import time
@@ -67,6 +68,7 @@ import console_ui as ui  # noqa: E402
 # Globals
 # ---------------------------------------------------------------------------
 CSRF_TOKEN = secrets.token_urlsafe(32)
+CSRF_FAILED = "CSRF check failed: reload this page and retry"
 AUTH_FAILURES = {}          # ip -> [count, last_fail_ts]
 AUTH_LOCK = threading.Lock()
 MAX_AUTH_FAILURES = 10
@@ -569,7 +571,7 @@ class Handler(BaseHTTPRequestHandler):
         if host:
             allowed.add(f"http://{host}")
             allowed.add(f"https://{host}")
-        if origin and origin not in allowed:
+        if origin and origin != "null" and origin not in allowed:
             return False
         if not origin and referer:
             ok = False
@@ -731,7 +733,7 @@ class Handler(BaseHTTPRequestHandler):
             if self._last_qs is None:
                 return
             if not self._check_csrf():
-                self._send(403, "CSRF check failed", "text/plain")
+                self._send(403, CSRF_FAILED, "text/plain")
                 return
 
             qs = self._last_qs
@@ -822,27 +824,32 @@ class Handler(BaseHTTPRequestHandler):
             return
         fields = {}
         files = []
+
+        def reply(status, body, content_type="text/plain"):
+            # Do not report a result until staged bytes are gone.
+            _cleanup_staged(files)
+            self._send(status, body, content_type)
+
         try:
             fields, files = _parse_multipart(ctype, raw)
             if not files:
-                self._send(400, "no file part", "text/plain")
+                reply(400, "no file part")
                 return
             if not self._check_csrf(fields.get("csrf_token")):
-                self._send(403, "CSRF check failed", "text/plain")
+                reply(403, CSRF_FAILED)
                 return
             did = fields.get("device_id", "").strip()
             if not _valid_device_id(did):
-                self._send(400, "bad device id", "text/plain")
+                reply(400, "bad device id")
                 return
             dest_raw = fields.get("dest", "").strip()
             if dest_raw and not _valid_upload_dest(dest_raw):
-                self._send(400, "invalid upload destination: use an absolute "
-                                 "path without '..'", "text/plain")
+                reply(400, "invalid upload destination: use an absolute "
+                           "path without '..'")
                 return
             if len(files) > 1 and dest_raw and not dest_raw.endswith("/"):
-                self._send(400, "upload destination must be a directory "
-                                 "(trailing /) when sending multiple files",
-                           "text/plain")
+                reply(400, "upload destination must be a directory "
+                           "(trailing /) when sending multiple files")
                 return
             actor = self._client_ip()
             results = []
@@ -856,10 +863,11 @@ class Handler(BaseHTTPRequestHandler):
                 payload = results[0]["result"]
             else:
                 payload = {"ok": ok, "files": results}
-            self._send(200 if ok else 502,
-                       ui.render_result(f"upload → {did}", payload,
-                                        f"/device/{ui.quote_safe(did)}",
-                                        csrf_token=CSRF_TOKEN))
+            reply(200 if ok else 502,
+                  ui.render_result(f"upload → {did}", payload,
+                                   f"/device/{ui.quote_safe(did)}",
+                                   csrf_token=CSRF_TOKEN),
+                  "text/html; charset=utf-8")
         finally:
             # Every validation and transfer path must remove staged bytes.
             _cleanup_staged(files)
@@ -870,7 +878,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._last_qs = qs
         if not self._check_csrf():
-            self._send(403, "CSRF check failed", "text/plain")
+            self._send(403, CSRF_FAILED, "text/plain")
             return
         did = (qs.get("device_id") or [""])[0].strip()
         if not _valid_device_id(did):
@@ -1089,12 +1097,23 @@ def _resolve_password(host):
     return pw
 
 
+def enable_tls(httpd, certfile, keyfile):
+    """Wrap the console socket for native HTTPS with an operator-supplied cert."""
+    context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(certfile=certfile, keyfile=keyfile)
+    httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+    return "https"
+
+
 def main():
     ap = argparse.ArgumentParser(description="ghostctl web console")
     ap.add_argument("--host", default="127.0.0.1",
                     help="bind host (default 127.0.0.1; use 0.0.0.0 for remote "
                          "+ explicit firewall rule — never open preemptively)")
     ap.add_argument("--port", type=int, default=9443)
+    ap.add_argument("--certfile", help="TLS certificate PEM for native HTTPS")
+    ap.add_argument("--keyfile", help="private key PEM for native HTTPS")
     a = ap.parse_args()
 
     _secure_log_file()
@@ -1102,17 +1121,20 @@ def main():
     global PASSWORD
     PASSWORD = _resolve_password(a.host)
 
-    if not _is_loopback(a.host):
+    if bool(a.certfile) != bool(a.keyfile):
+        sys.exit("HTTPS requires both --certfile and --keyfile")
+    if not _is_loopback(a.host) and not a.certfile:
         allow_http = os.environ.get("GHOST_CONSOLE_ALLOW_HTTP") == "1"
         if not allow_http:
-            sys.exit("Refusing to bind non-loopback without TLS. Put the console "
-                     "behind a TLS reverse proxy or set GHOST_CONSOLE_ALLOW_HTTP=1 "
-                     "to accept the risk.")
+            sys.exit("Refusing to bind non-loopback without TLS. Supply "
+                     "--certfile and --keyfile, use a TLS reverse proxy, or set "
+                     "GHOST_CONSOLE_ALLOW_HTTP=1 to accept the risk.")
         _log(f"WARNING: serving plain HTTP on non-loopback {a.host} "
              f"(GHOST_CONSOLE_ALLOW_HTTP=1)")
 
     httpd = ThreadingHTTPServer((a.host, a.port), Handler)
-    _log(f"ghostctl console listening on http://{a.host}:{a.port}")
+    scheme = enable_tls(httpd, a.certfile, a.keyfile) if a.certfile else "http"
+    _log(f"ghostctl console listening on {scheme}://{a.host}:{a.port}")
     if _is_loopback(a.host) and not os.environ.get("GHOST_CONSOLE_PASS"):
         _log(f"generated password written to {BASE / 'console.pass'} (mode 600)")
     _log(f"daemon admin at {ghostctl.ADMIN_HOST}:{ghostctl.ADMIN_PORT}")

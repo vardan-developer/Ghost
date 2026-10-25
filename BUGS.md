@@ -1902,13 +1902,22 @@ unchanged. **Source fixes and unit tests are not device/deployment proof.**
   enrollment, connection ownership, pending cleanup, bounded history,
   authenticated/redacted admin operations, stream TTL/caps, broadcast results,
   CSRF/XSS/request limits, responsive console workflows, and file/device removal.
-- Local verification at this addendum: **247 server tests, 154 ghostd tests and
+- Local verification at this addendum: **249 server tests, 154 ghostd tests and
   115 ghosta tests pass; both release builds pass.** Kali is updated and the
-  emulator reports 29/29 plus unlock, consent, reboot and removal passes.
+  emulator reports 29/29 plus unlock, consent, reboot and removal passes. The
+  console serves native HTTPS; its current IP certificate is self-signed.
 
-Still open or deployment-dependent: device-transport TLS and credential
-rotation, production file/directory permissions and TLS termination, approved-
-device pagination/cap hardening, the older camera/mic resource audit, endpoint
-cache/reconnect and localhost-link hardening, and all behavior requiring real
-PackageInstaller, keyguard, consent, reboot or long-idle verification. Do not
-mark those items closed from the unit-test result alone.
+Verified on the emulator: files, UI, shell, camera/mic, screenshots/live
+screen, stored-PIN unlock, per-capture consent, reboot recovery and two-app
+removal. PackageInstaller proof is mixed: ghosta installed after a timeout;
+ghostd self-update failed verification and was not installed. Fleet OTA stays
+open; do not bypass Play Protect.
+
+Console HTTPS is implemented with TLS 1.2+ and deployed using a self-signed IP
+certificate; replace it with a CA-issued certificate before relying on browser
+trust. Still open or deployment-dependent: device-transport WSS/TLS and
+credential rotation, production file/directory permissions, approved-device
+pagination/cap hardening, the older camera/mic resource audit, endpoint
+cache/reconnect and localhost peer-authentication hardening, long-idle
+availability, and a real phone-sized console review. SMS send, contacts,
+call-log readers and WhatsApp export remain unimplemented.

@@ -16,6 +16,7 @@ local.properties
 server/.env
 server/*.pem
 server/*.key
+server/*.crt
 
 # OS cruft
 .DS_Store

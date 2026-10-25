@@ -85,6 +85,13 @@ console serves it:
 ```sh
 python3 console.py                    # http://127.0.0.1:9443 (localhost only)
 GHOST_CONSOLE_PASS=sekrit python3 console.py --port 9443
+# Native HTTPS for remote access:
+openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 825 \
+  -keyout console.key -out console.crt \
+  -subj "/CN=203.0.113.10" \
+  -addext "subjectAltName=IP:203.0.113.10"
+chmod 600 console.key
+python3 console.py --host 0.0.0.0 --certfile console.crt --keyfile console.key
 ```
 Stdlib-only (http.server), server-rendered HTML, no CDNs — works offline.
 Talks to the daemon by importing `ghostctl` and reusing its authenticated
@@ -95,10 +102,14 @@ history is fetched through the daemon's `history` admin operation.
   for localhost-only use, an unset password is generated into mode-600
   `console.pass` rather than printed (username is ignored —
   `curl -u ghost:<pass>`). CSRF protection covers state-changing routes.
-  Tokens, PINs and passwords are redacted from history and logs.
-- Binding: `127.0.0.1` by default. Non-loopback HTTP is refused unless
-  `GHOST_CONSOLE_ALLOW_HTTP=1` is explicitly set; use TLS for remote access.
-  Only open the firewall when needed (`sudo ufw allow 9443/tcp`).
+  Tokens, PINs and passwords are redacted from history and logs. CSRF tokens
+  rotate with the console process; reload the page once after a restart or an
+  HTTP-to-HTTPS switch so an old tab does not post a stale token.
+- Binding: `127.0.0.1` by default. Native HTTPS uses
+  `--certfile`/`--keyfile` (TLS 1.2+) and avoids the HTTP override. Non-loopback
+  HTTP is refused unless `GHOST_CONSOLE_ALLOW_HTTP=1` is explicitly set; do not
+  use that override for normal remote access. Only open the firewall when
+  needed (`sudo ufw allow 9443/tcp`).
 - Pages:
   - `/` dashboard with device cards, search/filter and pending approvals.
   - `/device/<id>` grouped Files, Screen, UI, Media and System actions plus
@@ -112,6 +123,12 @@ history is fetched through the daemon's `history` admin operation.
   - File upload/download with progress/error reporting and abort support.
 - POST `/device/<id>/cmd` runs a device action and renders a bounded result.
   The console `update` action uses the daemon's complete APK-push flow.
+
+Current deployment: Kali runs this console over HTTPS on :9443 with a
+self-signed certificate for its IP, so browsers require a one-time trust
+exception. Replace it with a CA-issued certificate for normal use. Device
+transport (:8443) remains `ws://` until the documented WSS migration is done;
+do not treat console HTTPS as device-transport TLS.
 
 ## Test
 ```sh

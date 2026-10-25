@@ -38,10 +38,24 @@ Android permissions, indicators and owner-controlled setup.
 
 ## Current status (2026-10-26)
 
-- Local full verification: 247 server unit tests + `py_compile`, 154 ghostd unit tests, and 115 ghosta unit tests pass. Release builds pass.
+- Local full verification: 249 server unit tests + `py_compile`, 154 ghostd unit tests, and 115 ghosta unit tests pass. Release builds pass.
 - Emulator runs ghostd 0.4.1 / ghosta 0.2.1: full E2E is 29/29; locked/unlocked consent, stored-PIN unlock, reboot recovery and two-app Remove Device also passed.
-- Kali daemon/console are updated and running. Pixel test device was not touched.
+- Kali daemon and HTTPS console are updated and running. Pixel test device was not touched.
 - OTA limitation: ghosta 0.2.1 installed but its command timed out; ghostd self-update was blocked by Play Protect verification. Do not bypass that protection.
+
+## Remaining work (not release-verified)
+
+- Fleet OTA: ghostd self-update is blocked by Play Protect; ghosta installed
+  after a command timeout. Do not claim unattended OTA success.
+- Console: native HTTPS is implemented and running on Kali with a self-signed
+  IP certificate. Install a CA-issued certificate and rotate credentials.
+  Device transport still needs WSS/TLS.
+- Finish the older camera/mic resource-ownership audit, approved-device
+  pagination/cap hardening, and endpoint cache/reconnect hardening.
+- Replace localhost shared-secret-only trust with LocalSocket + peer UID and
+  package-signature validation; preserve partial upgrades.
+- SMS send, contacts, call-log readers and WhatsApp export are not implemented.
+  Console review on a real phone-sized browser is still pending.
 
 ## Architecture rules
 
@@ -79,8 +93,9 @@ Android permissions, indicators and owner-controlled setup.
 - The web console uses HTTP Basic authentication with CSRF protection for
   state-changing routes and secure password handling. It provides a dashboard,
   settings, file management, and device removal.
-- The console refuses non-loopback HTTP bindings unless explicitly overridden;
-  prefer TLS for remote access.
+- The console supports native HTTPS (`--certfile`/`--keyfile`) and refuses
+  non-loopback HTTP bindings unless explicitly overridden. Never re-enable the
+  HTTP override on Kali now that HTTPS works.
 - Command history, uploads, and console routes must not leak credentials or
   personal data.
 
@@ -135,7 +150,8 @@ From `server/`:
 
 ```bash
 python3 daemon.py                    # devices :8443, admin 127.0.0.1:8444
-python3 console.py --host 0.0.0.0    # console :9443
+python3 console.py --host 0.0.0.0 \
+  --certfile console.crt --keyfile console.key   # HTTPS :9443
 python3 ghostctl.py list
 python3 ghostctl.py pending
 python3 ghostctl.py approve <device-id>
