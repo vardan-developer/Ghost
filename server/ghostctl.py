@@ -146,6 +146,16 @@ def main():
     if ns.verb == "streams":
         emit(rpc({"op": "streams"}), ns.pretty)
         return
+    if ns.verb == "config":
+        # `config` (show) or `config set <key> <value>`
+        if ns.rest and ns.rest[0] == "set":
+            if len(ns.rest) < 3:
+                sys.exit("usage: ghostctl.py config set <max_pending|max_per_ip> <int>")
+            emit(rpc({"op": "config", "args": ["set", ns.rest[1], ns.rest[2]]}),
+                 ns.pretty)
+        else:
+            emit(rpc({"op": "config"}), ns.pretty)
+        return
     if ns.verb == "pending" and not ns.device and not ns.all:
         emit(rpc({"op": "pending"}), ns.pretty)
         return

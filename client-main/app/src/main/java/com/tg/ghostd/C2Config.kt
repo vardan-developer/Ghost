@@ -25,8 +25,8 @@ object C2 {
 
     /**
      * Device enrollment shared secret sent in every "hello". MUST match the
-     * server's enroll key (server GHOST_ENROLL_KEY / enroll.key). Regenerated
+     * server's enroll key (server GHOST_ENROLL_KEY / .env). Regenerated
      * at deploy time — change it in this one place only.
      */
-    const val ENROLL_KEY = "changeme-enroll-0"
+    const val ENROLL_KEY = "2f1352f9bb4a082458700b4231b06fdb"
 }

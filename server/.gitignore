@@ -3,5 +3,9 @@ state.json
 history.json
 *.tmp
 __pycache__/
+# secrets — never commit
+enroll.key
+.env
+last-screenshot.png
 # APK store for `update` pushes — never commit binaries
 apks/

@@ -1,0 +1,4 @@
+{
+  "max_pending": 50,
+  "max_per_ip": 5
+}

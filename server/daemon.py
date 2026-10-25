@@ -64,12 +64,34 @@ STATE_FILE = BASE / "state.json"
 HISTORY_FILE = BASE / "history.json"
 APK_DIR = BASE / "apks"
 ENROLL_KEY_FILE = BASE / "enroll.key"
+CONFIG_FILE = BASE / "config.json"
+ENV_FILE = BASE / ".env"
 LOG_FILE = BASE / "daemon.log"
 
-# Flood protection limits.
+# Flood protection limits (editable live via `ghostctl config set`;
+# startup overrides via .env GHOST_MAX_PENDING / GHOST_MAX_PER_IP):
 MAX_PENDING = 50    # total pending (unapproved) devices kept in state
 MAX_PER_IP = 5      # concurrent device connections per source IP
 LOG_MAX_BYTES = 512 * 1024   # daemon.log is trimmed beyond this (rolling)
+
+
+def load_dotenv(path=ENV_FILE):
+    """Minimal .env loader: KEY=VALUE lines, # comments, no quoting magic.
+    Existing environment variables win (classic dotenv precedence)."""
+    try:
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k, v = k.strip(), v.strip()
+            if k and k not in os.environ:
+                os.environ[k] = v
+    except FileNotFoundError:
+        pass
+
+
+load_dotenv()
 
 
 # Every verb the client CommandHandler (client-main) or the PROJECT.md v1
@@ -266,9 +288,18 @@ class Daemon:
         self.pending = {}  # cmd_id -> {"event","result","ok"}
         self.streams = StreamCache()
         self.push_lock = asyncio.Lock()  # serialize file pushes (see push_file)
+        # flood-protection caps: config.json base, .env override at start,
+        # live-editable via the admin op "config set" (persisted instantly)
+        cfg = load_json(CONFIG_FILE, {})
+        self.config = {
+            "max_pending": int(os.environ.get(
+                "GHOST_MAX_PENDING", cfg.get("max_pending", MAX_PENDING))),
+            "max_per_ip": int(os.environ.get(
+                "GHOST_MAX_PER_IP", cfg.get("max_per_ip", MAX_PER_IP))),
+        }
         self.enroll_key = load_enroll_key()
         self.ip_conns = {}  # source ip -> open device connection count
-        log("enrollment key loaded")
+        log(f"enrollment key loaded (caps: {self.config})")
 
     # ---------- persistence ----------
     def persist_state(self):
@@ -448,10 +479,10 @@ class Daemon:
         if isinstance(enroll, str) and enroll and \
                 hmac.compare_digest(self.enroll_key, enroll):
             was_pending = not rec.get("approved")
-            if not was_pending and len(self.pending_ids()) >= MAX_PENDING:
+            if not was_pending and len(self.pending_ids()) >= self.config["max_pending"]:
                 log(f"denied hello from {did} "
                     f"({ws.remote_address[0]}): pending device limit "
-                    f"({MAX_PENDING}) reached")
+                    f"({self.config['max_pending']}) reached")
                 return None, {"type": "hello_ack", "status": "denied"}
             token = new_token()
             return did, {"type": "hello_ack", "status": "pending", "token": token}
@@ -465,9 +496,9 @@ class Daemon:
     async def device_handler(self, ws):
         device_id = None
         ip = (ws.remote_address or (None,))[0] or "?"
-        if self.ip_conns.get(ip, 0) >= MAX_PER_IP:
+        if self.ip_conns.get(ip, 0) >= self.config["max_per_ip"]:
             log(f"dropped device connection from {ip}: per-IP limit "
-                f"({MAX_PER_IP}) reached")
+                f"({self.config['max_per_ip']}) reached")
             await ws.close()
             return
         self.ip_conns[ip] = self.ip_conns.get(ip, 0) + 1
@@ -578,6 +609,22 @@ class Daemon:
                            extra={"approved": False, "token": token})
                 log(f"device {did} revoked via admin (token rotated)")
                 return {"ok": True, "device_id": did, "approved": False}
+            if op == "config":
+                # `config` -> show; `config set <key> <value>` -> live-apply
+                rest = req.get("args") or []
+                if rest and rest[0] == "set":
+                    key, value = rest[1], rest[2]
+                    if key not in self.config:
+                        return {"ok": False, "error": f"unknown setting {key!r} "
+                                f"(known: {', '.join(self.config)})"}
+                    try:
+                        self.config[key] = int(value)
+                    except ValueError:
+                        return {"ok": False, "error": f"{key} must be an integer"}
+                    save_json(CONFIG_FILE, self.config)
+                    log(f"config set {key}={self.config[key]} via admin")
+                    return {"ok": True, "config": dict(self.config)}
+                return {"ok": True, "config": dict(self.config)}
             if op == "streams":
                 return {"ok": True, "streams": self.streams.listing()}
             if op == "stream_frame":
