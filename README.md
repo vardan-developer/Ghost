@@ -186,11 +186,12 @@ certificate for normal use.
 
 Known console UI gaps: device model/sidekick fields do not populate because the
 daemon does not persist them, and live-screen start/polling are not fully wired
-through. The console visuals branch is merged into `main`; it fixes upload
-cancellation, removes the inaccurate download progress/abort claims, and
-accepts exact-path downloads containing spaces, punctuation and non-ASCII
-characters. Backend API tests alone do not prove browser workflows, and a
-real phone-sized browser review remains pending.
+through. The console visuals work is merged and deployed; it fixes upload
+cancellation, removes the inaccurate download progress/abort claims, accepts
+exact-path downloads containing spaces, punctuation and non-ASCII characters,
+and fixes native form CSRF by using `Referrer-Policy: same-origin`. Backend API
+tests alone do not prove browser workflows, and a real phone-sized browser
+review remains pending.
 
 The CSRF token is scoped to the running console process. After a console
 restart (or an HTTP-to-HTTPS switch), reload the login/page once; posting from
@@ -198,11 +199,11 @@ an old tab can show `CSRF check failed` even though the password is correct.
 `Origin: null` is rejected even with a valid token.
 
 The current Kali deployment is HTTPS-only on :9443 with a self-signed
-certificate for its IP. External TLS and an authenticated CSRF-protected POST
-were verified; plain HTTP to that port is rejected. The newer worker-thread TLS
-hardening is source-tested but still needs to be redeployed. Trust the
-certificate once in the browser temporarily, and replace it with a CA-issued
-certificate before treating the console as production-ready.
+certificate for its IP. External TLS, an authenticated CSRF-protected POST and a
+real-browser native form POST were verified; plain HTTP to that port is
+rejected. The hardened backend is deployed. Trust the certificate once in the
+browser temporarily, and replace it with a CA-issued certificate before
+treating the console as production-ready.
 
 The device listener on the same host is WSS-only with a self-signed certificate
 pinned in ghostd; the emulator reconnects over WSS. The certificate is separate
@@ -288,24 +289,22 @@ moves; do not rely on old chat history for repository state.
   checks; it requires an installed Playwright + Chrome and is not run by the
   Python suite.
 - Release builds pass for ghostd 0.4.2 / versionCode 24 and ghosta 0.2.1. The
-  prior 29/29 E2E, unlock, per-capture consent, reboot recovery and two-app
+  full 29/29 E2E passed on the emulator over WSS, and live token/admin rotation
+  passed. The earlier unlock, per-capture consent, reboot recovery and two-app
   removal results were recorded on ghostd 0.4.1 **before** WSS was introduced.
-  The emulator now reconnects over WSS on 0.4.2; the full WSS E2E and live
-  token/admin rotation still need to be rerun.
 
 ### Remaining work
 
 - **OTA:** ghosta installed after a command timeout; ghostd self-update was
   blocked by Play Protect verification. Fleet OTA is not ready; do not bypass
   Play Protect.
-- **Transport:** device WSS is deployed with a self-signed pinned certificate
-  and the emulator reconnects over it. The full WSS E2E suite and live
-  `rotate-token`/`rotate-admin` checks are still pending. Pixel 10a remains on
-  ghostd 0.3.8 and must be updated manually before it can use the WSS-only
-  listener.
-- **Console:** native HTTPS on Kali still uses a self-signed IP certificate;
-  deploy the hardened backend, install a CA-issued certificate and rotate
-  credentials. Device transport is now WSS; the console certificate is separate.
+- **Transport:** device WSS is deployed with a self-signed pinned certificate.
+  The full WSS E2E and live `rotate-token`/`rotate-admin` checks passed on the
+  emulator. Pixel 10a remains on ghostd 0.3.8 and must be updated manually
+  before it can use the WSS-only listener.
+- **Console:** the hardened backend is deployed over HTTPS on Kali, but still
+  uses a self-signed IP certificate. Install a CA-issued certificate and rotate
+  the console password. Device transport and console certificates are separate.
 - **Console UI:** model/sidekick metadata and live-screen start/polling still
   need fixes and a real phone-sized browser review. Do not claim those are
   complete.

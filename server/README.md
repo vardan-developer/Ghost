@@ -151,20 +151,20 @@ history is fetched through the daemon's `history` admin operation.
     confirmation and uninstalls both apps without deleting personal data.
   - `/broadcast` — restricted to safe read/stop verbs.
   - `/stream/<id>` — live view markup and tokenized feeds; browser start/poll
-    wiring is a known UI gap under repair.
+    wiring is a known UI gap.
   - `/settings` — flood-cap editing.
-  - Upload backend and abort RPC exist. Browser cancellation and
-    download-progress/abort UI are known gaps under repair; do not claim those
-    workflows as verified yet.
+  - Upload backend and abort RPC exist. Upload cancellation is implemented and
+    browser-tested; in-page download progress/abort is not implemented or
+    claimed.
 - POST `/device/<id>/cmd` runs a device action and renders a bounded result.
   The console `update` action uses the daemon's complete APK-push flow.
 
 Current deployment: Kali runs this console HTTPS-only on :9443 with a
 self-signed certificate for its IP, so browsers require a one-time trust
-exception. External TLS and an authenticated CSRF-protected POST were verified;
-plain HTTP on :9443 is rejected. The worker-thread TLS hardening in this tree is
-source-tested but has not yet been redeployed. Replace the console certificate
-with a CA-issued one for normal use.
+exception. External TLS, an authenticated CSRF-protected POST and a real-browser
+native form POST were verified; plain HTTP on :9443 is rejected. The
+worker-thread TLS hardening is deployed. Replace the console certificate with a
+CA-issued one for normal use.
 
 Device transport on :8443 is WSS-only with a separate self-signed certificate
 pinned in ghostd; the emulator reconnects over it. Console HTTPS does not imply
@@ -173,8 +173,8 @@ device listener to plaintext.
 
 ## Test
 ```sh
-python3 -m py_compile daemon.py ghostctl.py console.py e2e_test.py
-python3 -m unittest -q test_daemon.py test_ghostctl.py test_console.py test_envfile.py
+python3 -m py_compile daemon.py ghostctl.py console.py console_ui.py e2e_test.py
+python3 -m unittest -q test_daemon.py test_ghostctl.py test_console.py test_console_ui.py test_envfile.py
 python3 daemon.py --bind 127.0.0.1 &     # loopback-only plaintext for fake clients
 python3 fake_client.py test-1 &          # mock device
 python3 ghostctl.py list
@@ -189,11 +189,11 @@ python3 ghostctl.py -d test-1 update sidekick   # push + install (sha256-checked
 ```
 
 The full device suite is `python3 e2e_test.py <approved-device-id>` and must be
-run over WSS against an approved emulator after transport changes. The merged
-console visuals work adds `test_console_ui.py` (presentation) and
-`test_console_ui_browser.cjs` (Playwright + local Chrome); run the browser suite
-separately and do not claim browser workflows verified from the Python suite
-alone.
+run over WSS against an approved emulator after transport changes. The current
+emulator run passes 29/29 over WSS. The merged console visuals work adds
+`test_console_ui.py` (presentation) and `test_console_ui_browser.cjs`
+(Playwright + local Chrome); run the browser suite separately and do not claim
+browser workflows verified from the Python suite alone.
 
 Requires `websockets` (`pip install --user websockets`). Do not commit
 `state.json` / `history.json` / `apks/` / TLS private keys (runtime artifacts,

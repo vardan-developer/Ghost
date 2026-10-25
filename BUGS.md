@@ -9,25 +9,26 @@ Current reconciliation (2026-10-26):
 - **Fixed and tested:** file-transfer ownership, server/console/CLI audit items,
   MediaProjection per-capture consent and latch/activity cleanup, endpoint
   E2E portability, CLI aliases, update reconciliation/session scoping (source),
-  native console HTTPS, console TLS hardening (source-tested; redeploy pending),
-  WSS-only device transport with SPKI pinning/system-CA fallback, hash-only server
-  tokens, Android Keystore token storage with backup disabled, online
-  device/admin credential rotation, and the console visuals merge. Local
+  native console HTTPS, console TLS hardening (deployed and externally
+  verified), WSS-only device transport with SPKI pinning/system-CA fallback,
+  hash-only server tokens, Android Keystore token storage with backup disabled,
+  online device/admin credential rotation, and the console visuals merge. Local
   suites: 284 server, 162 ghostd and 115 ghosta tests, plus `py_compile`; release
   builds pass.
-- **Verified on the emulator:** the earlier 29/29 E2E, unlock/consent, reboot
-  recovery and two-app removal on ghostd 0.4.1. ghosta OTA installed after a
-  timeout; ghostd self-update remains blocked by Play Protect. ghostd 0.4.2 is
-  now online over WSS, but the full WSS E2E and live `rotate-token` /
-  `rotate-admin` runs are still pending.
+- **Verified on the emulator:** the full **29/29 E2E passes over WSS** on
+  ghostd 0.4.2 / ghosta 0.2.1, and live `rotate-token` / `rotate-admin` passed.
+  The emulator reconnected with the rotated token. The earlier unlock/consent,
+  reboot recovery and two-app removal results were recorded on ghostd 0.4.1
+  before WSS. ghosta OTA installed after a timeout; ghostd self-update remains
+  blocked by Play Protect.
 - **Still open:** older camera/mic resource-ownership cleanup, localhost peer
   UID/signature validation, CA-issued console certificate, approved-device
   pagination/caps, endpoint cache/reconnect hardening, console model/sidekick
   persistence, live-screen start/polling, a real phone-sized UI review, and the
-  shared enrollment key. The console visuals branch is merged into `main`; its
+  shared enrollment key. The console visuals work is merged and deployed; its
   backend path fix permits exact-path downloads with spaces, punctuation and
-  non-ASCII characters. SMS send, contacts, call-log readers and WhatsApp export
-  are unimplemented.
+  non-ASCII characters, and native form CSRF is fixed. SMS send, contacts,
+  call-log readers and WhatsApp export are unimplemented.
 - **Not touched:** Pixel 10a remains on ghostd 0.3.8 and does not trust the
   WSS-only listener yet.
 
@@ -1963,10 +1964,11 @@ unchanged. **Source fixes and unit tests are not device/deployment proof.**
   authenticated/redacted admin operations, stream TTL/caps, broadcast results,
   CSRF/XSS/request limits, responsive console workflows, and file/device removal.
 - Local verification at this addendum: **254 server tests, 154 ghostd tests and
-  115 ghosta tests pass; both release builds pass.** Kali runs the previous
-  HTTPS build (the TLS hardening below still needs redeployment), and the
-  emulator reports 29/29 plus unlock, consent, reboot and removal passes. The
-  console serves native HTTPS; its current IP certificate is self-signed.
+  115 ghosta tests pass; both release builds pass.** At that date Kali ran the
+  previous HTTPS build (the TLS hardening was later deployed; see the security/
+  transport addendum below), and the emulator reports 29/29 plus unlock, consent,
+  reboot and removal passes. The console serves native HTTPS; its current IP
+  certificate is self-signed.
 
 Verified on the emulator: files, UI, shell, camera/mic, screenshots/live
 screen, stored-PIN unlock, per-capture consent, reboot recovery and two-app
@@ -1975,22 +1977,20 @@ ghostd self-update failed verification and was not installed. Fleet OTA stays
 open; do not bypass Play Protect.
 
 Console HTTPS is implemented with TLS 1.2+ and deployed using a self-signed IP
-certificate. External TLS and an authenticated CSRF-protected POST passed, and
-plain HTTP on :9443 is rejected; replace the certificate with a CA-issued one
-before relying on browser trust. The newer backend hardening is source-tested
-but not redeployed: worker-thread handshakes with a 10-second timeout and
-32-handshake cap (an idle TCP client cannot block accepts), startup validation
-before password generation/binding, a mode-600 private-key requirement,
-scheme-correct CSRF origins with `Origin: null` rejected, and HSTS plus a
-`Secure` CSRF cookie when native HTTPS is active. Tests include a real OpenSSL
-handshake, an idle-connection isolation check, plain-HTTP rejection on the TLS
-port, unsafe-key rejection, startup failure without a traceback, and HTTPS
-cookie/HSTS headers. Open at that date: redeploying the hardened backend and
-re-verifying externally, device-transport WSS/TLS and credential rotation,
-production file/directory permissions, approved-device pagination/cap
+certificate. External TLS, an authenticated CSRF-protected POST and a
+real-browser native form POST passed, and plain HTTP on :9443 is rejected;
+replace the certificate with a CA-issued one before relying on browser trust.
+The backend hardening is deployed: worker-thread handshakes with a 10-second
+timeout and 32-handshake cap, startup validation before password generation/
+binding, a mode-600 private-key requirement, scheme-correct CSRF origins with
+`Origin: null` rejected, and HSTS plus a `Secure` CSRF cookie when native HTTPS
+is active. Tests include a real OpenSSL handshake, an idle-connection isolation
+check, plain-HTTP rejection on the TLS port, unsafe-key rejection, startup
+failure without a traceback, and HTTPS cookie/HSTS headers. Still open:
+CA-issued console certificate/password rotation, approved-device pagination/cap
 hardening, the older camera/mic resource audit, endpoint cache/reconnect and
 localhost peer-authentication hardening, long-idle availability, and a real
-phone-sized console review (including the known UI polling/cancel/download gaps
+phone-sized console review (including the known UI polling and download gaps
 in `BACKLOG.md`). SMS send, contacts, call-log readers and WhatsApp export remain
 unimplemented.
 
@@ -2004,10 +2004,10 @@ and disables backup, and `rotate-token`/`rotate-admin` implement online
 rotation. Local verification is 284 server, 162 ghostd and 115 ghosta tests plus
 `py_compile`; release builds pass.
 
-The emulator reconnects over WSS as ghostd 0.4.2 / ghosta 0.2.1. The recorded
-29/29 E2E and unlock/consent/reboot/removal checks remain pre-WSS (ghostd 0.4.1).
-The full WSS E2E and live token/admin rotation have not been rerun. Pixel 10a
+The emulator runs ghostd 0.4.2 / ghosta 0.2.1 online over WSS. The full 29/29
+E2E now passes over WSS, and live token/admin rotation passed. The earlier
+unlock/consent/reboot/removal checks remain pre-WSS (ghostd 0.4.1). Pixel 10a
 was not touched and remains on ghostd 0.3.8. The console still uses a
-self-signed IP certificate and the hardened backend still needs redeployment.
-The shared enrollment key remains a residual risk, and the still-open list in
-the top reconciliation is authoritative.
+self-signed IP certificate, but the hardened backend is deployed and externally
+verified. The shared enrollment key remains a residual risk, and the still-open
+list in the top reconciliation is authoritative.

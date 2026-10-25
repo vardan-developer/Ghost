@@ -46,16 +46,16 @@ Android permissions, indicators and owner-controlled setup.
   CA chain through the Android system store or a self-signed listener via an
   SPKI pin. Server-side device tokens are hash-only; ghostd stores its token
   with Android Keystore and has app backup disabled.
-- The emulator reconnects online over WSS as ghostd 0.4.2 / ghosta 0.2.1. The
-  recorded 29/29 E2E, locked/unlocked consent, stored-PIN unlock, reboot
-  recovery and two-app Remove Device results were obtained on ghostd 0.4.1
-  **before** WSS. The full WSS E2E and live `rotate-token`/`rotate-admin` checks
-  have not been rerun.
-- Kali runs the WSS device listener and HTTPS-only console. External TLS and an
-  authenticated CSRF-protected POST passed; plain HTTP on :9443 is rejected.
-  The newer worker-thread TLS hardening (handshake isolation, bounded
-  timeout/concurrency, startup/key-permission checks, HSTS/Secure cookie,
-  `Origin: null` rejection) is source-tested but not yet redeployed.
+- The emulator is online over WSS as ghostd 0.4.2 / ghosta 0.2.1. The full
+  29/29 E2E now passes over WSS. Live `rotate-token` and `rotate-admin` passed;
+  the emulator reconnected with the rotated device token, and the console/admin
+  API continued to work after admin rotation. The earlier stored-PIN unlock,
+  locked/unlocked consent, reboot recovery and two-app Remove Device results
+  were recorded on ghostd 0.4.1 before WSS and have not all been rerun under WSS.
+- Kali runs the redeployed WSS listener and hardened HTTPS-only console.
+  External TLS, authenticated CSRF POST and a real-browser native form POST
+  passed; plain HTTP on :9443 is rejected. The console still uses a self-signed
+  IP certificate.
 - Pixel 10a was not touched and remains on ghostd 0.3.8. It will not trust the
   WSS listener until it is manually updated.
 - OTA limitation: ghosta 0.2.1 installed but its command timed out; ghostd
@@ -64,16 +64,13 @@ Android permissions, indicators and owner-controlled setup.
 
 ## Remaining work (not release-verified)
 
-- Rerun the full E2E on the emulator over WSS, then live-test online
-  `rotate-token` and `rotate-admin`. Rotate the shared enrollment key with a
-  matching app build.
+- Rotate the shared enrollment key with a matching app build.
 - Fleet OTA: ghostd self-update is blocked by Play Protect; ghosta installed
   after a command timeout. Do not claim unattended OTA success.
-- Console: native HTTPS runs on Kali with a self-signed IP certificate. Deploy
-  the hardened `server/console.py`, install a CA-issued certificate and rotate
-  credentials. The console visuals branch is merged into `main`; model/sidekick
-  fields, live-screen start/polling, and a real phone-sized browser review
-  remain unfinished.
+- Console: native HTTPS runs on Kali with a self-signed IP certificate and the
+  hardened backend is redeployed. Install a CA-issued certificate, rotate the
+  console password, and finish model/sidekick fields, live-screen
+  start/polling, and a real phone-sized browser review.
 - Finish the older camera/mic resource-ownership audit, approved-device
   pagination/cap hardening, and endpoint cache/reconnect hardening.
 - Replace localhost shared-secret-only trust with LocalSocket + peer UID and

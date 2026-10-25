@@ -11,14 +11,16 @@ Last updated: 2026-10-26.
 - Physical test phone: **Pixel 10a**, approved and controllable. It must remain untouched during current local/emulator work.
 - Phone currently reports **ghostd 0.3.8**. Working tree is **ghostd 0.4.2 / ghosta 0.2.1**.
 - **Local full verification now passes:** 284 server unit tests + `py_compile`, 162 ghostd unit tests, 115 ghosta unit tests, plus 42 browser layout/interaction checks, and release builds.
-- **Emulator:** Runs ghostd 0.4.2 / ghosta 0.2.1 online over WSS. The
-  recorded 29/29 E2E, stored-PIN unlock, locked-screen consent, fresh grants,
-  reboot recovery and two-app Remove Device results were obtained on ghostd
-  0.4.1 **before** WSS. The full WSS E2E has not been rerun.
-- **Kali server:** Daemon runs normally. The console runs the previous native
-  HTTPS build on :9443 with a self-signed IP certificate (expires 2029-01-27);
-  external TLS and an authenticated CSRF-protected POST passed, and plain HTTP
-  is rejected. The worker-thread TLS hardening still needs redeployment.
+- **Emulator:** Runs ghostd 0.4.2 / ghosta 0.2.1 online over WSS. The full
+  **29/29 E2E now passes over WSS**. Live `rotate-token` and `rotate-admin`
+  passed; the emulator reconnected with the rotated token and the console/admin
+  API kept working. Stored-PIN unlock, locked-screen consent, fresh grants,
+  reboot recovery and two-app Remove Device were recorded on ghostd 0.4.1
+  before WSS and have not all been rerun.
+- **Kali server:** WSS daemon and hardened native-HTTPS console are redeployed
+  and running. External TLS, authenticated CSRF POST and a real-browser native
+  form POST passed; plain HTTP on :9443 is rejected. The console still uses a
+  self-signed IP certificate.
 - Historical first e2e run (superseded by the 29/29 result above) passed 17/22
   checks. Its failures were: a wrong volume test invocation, an interrupted
   file push, the phone's camera-access policy, and live screen producing no
@@ -36,28 +38,23 @@ Last updated: 2026-10-26.
 
 ## Immediate next steps — remaining hardening
 
-1. Rerun the full E2E on the emulator over WSS, then live-test online
-   `rotate-token` and `rotate-admin`.
+1. Rotate the shared enrollment key with a matching app build.
 2. Finish the camera/mic resource-ownership audit below (close every session,
    reader and worker on stop/timeout).
 3. Replace localhost shared-secret-only peer trust with LocalSocket + peer UID
    and package-signature validation without breaking partial upgrades.
-4. Console backend TLS hardening is implemented and locally tested
-   (worker-thread handshakes, bounded handshake concurrency/timeout, startup
-   validation before password generation, key-permission check, HSTS/Secure
-   cookie, `Origin: null` rejection). Rebuild/restart Kali, then re-verify
-   external TLS and an authenticated CSRF POST.
+4. Console TLS hardening is deployed with the WSS listener and verified over
+   external HTTPS, including a real-browser native form POST. Replace the
+   self-signed console certificate with a CA-issued certificate and rotate the
+   console password.
 5. Finish the remaining console UI fixes: populate device model/sidekick
    fields from daemon state and wire live screen start/polling. The console
-   visuals branch is merged; upload cancellation and exact-path downloads are
-   fixed, and download progress is left to the browser. Review on a real phone
-   browser before deployment.
+   visuals work is merged and deployed; upload cancellation and exact-path
+   downloads are fixed, and download progress is left to the browser. Review on
+   a real phone browser before claiming the UI verified.
 6. Add approved-device pagination/output caps to admin list/pending paths and
    finish endpoint-cache/reconnect hardening.
-7. Replace the console's self-signed IP certificate with a CA-issued one and
-   rotate credentials. Deploy device-transport TLS before changing clients to
-   `wss://`, then rotate exposed device credentials.
-8. OTA limitation is verified: ghosta installed but its command timed out;
+7. OTA limitation is verified: ghosta installed but its command timed out;
    ghostd self-update was blocked by Play Protect verification. Do not bypass
    that protection or claim unattended fleet OTA is ready.
 
@@ -425,7 +422,7 @@ do not bypass Play Protect or treat these tests as a successful self-update.
 - Consider accessibility-based low-rate live frames only after still capture
   and current live projection are stable. Do not promise invisible live capture.
 
-## Console visuals — merged into main, not deployed (2026-10-26)
+## Console visuals — merged and deployed (2026-10-26)
 
 - Branch `codex/console-visuals` was merged into `main` by merge commit
   `f39d675`; the worktree is clean. `main` includes the WSS/rotation work and
@@ -467,10 +464,13 @@ do not bypass Play Protect or treat these tests as a successful self-update.
   UI follow-ups: saved-history results lack raw JSON details, multi-field input
   IDs would collide if a multi-field verb is added, and the `aria-live` elapsed
   status updates every second. Real-phone Safari remains untested.
-- Merged into `main` by `f39d675`; not pushed or deployed. The other agent's
-  uncommitted Android/server work was not included or touched.
+- Merged into `main` by `f39d675`, pushed, and deployed to Kali. Follow-up
+  commit `9a87243` fixed native-form CSRF by changing `Referrer-Policy` to
+  `same-origin`; Chromium no longer sends `Origin: null` for same-origin forms.
+  A real-browser native form POST now returns 200. The other agent's uncommitted
+  Android/server work was not included or touched.
 
-## Web console — backend deployed, merged UI not deployed
+## Web console — backend and merged UI deployed
 
 Kali serves the console HTTPS-only and returns HTTP 200 over TLS; external TLS
 plus an authenticated CSRF-protected device command passed. Plain HTTP on :9443
@@ -479,8 +479,8 @@ smoke checks passed. Security includes admin auth, token redaction, HTTP Basic
 over TLS, CSRF (now rejecting `Origin: null` even with a valid token), request
 limits, CSP and stream tokens. Native TLS supports `--certfile`/`--keyfile`,
 worker-thread handshakes, a bounded handshake timeout/concurrency cap, a
-mode-600 key check, HSTS and a `Secure` CSRF cookie. The hardened source still
-needs redeployment and external re-verification.
+mode-600 key check, HSTS and a `Secure` CSRF cookie. The hardened backend and
+merged UI are deployed and externally re-verified.
 
 The HTTP backend is implemented; the browser UI is not fully verified:
 
@@ -488,10 +488,11 @@ The HTTP backend is implemented; the browser UI is not fully verified:
   daemon does not persist those hello fields.
 - The live-screen page does not start polling, and its Start action posts to a
   result page instead of a usable live view.
-- The console visuals branch is merged into `main` and fixes Upload Cancel to
+- The console visuals work is merged and deployed. It fixes Upload Cancel to
   use URL-encoded data for `/files/abort`; exact-path downloads now accept
-  spaces, punctuation and non-ASCII. It is source/browser-verified but not
-  deployed. In-page download progress/abort is not implemented or claimed.
+  spaces, punctuation and non-ASCII; and native form CSRF works after the
+  `Referrer-Policy: same-origin` fix. In-page download progress/abort is not
+  implemented or claimed.
 - A real phone-sized browser and accessibility review remains.
 
 Working backend/browser pieces:
