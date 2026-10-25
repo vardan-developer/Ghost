@@ -189,10 +189,11 @@ python3 ghostctl.py -d test-1 update sidekick   # push + install (sha256-checked
 ```
 
 The full device suite is `python3 e2e_test.py <approved-device-id>` and must be
-run over WSS against an approved emulator after transport changes. The UI branch
-adds `test_console_ui.py` (presentation) and `test_console_ui_browser.cjs`
-(Playwright + local Chrome); do not claim browser workflows verified from the
-Python suite alone.
+run over WSS against an approved emulator after transport changes. The merged
+console visuals work adds `test_console_ui.py` (presentation) and
+`test_console_ui_browser.cjs` (Playwright + local Chrome); run the browser suite
+separately and do not claim browser workflows verified from the Python suite
+alone.
 
 Requires `websockets` (`pip install --user websockets`). Do not commit
 `state.json` / `history.json` / `apks/` / TLS private keys (runtime artifacts,

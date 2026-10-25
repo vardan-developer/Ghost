@@ -9,12 +9,12 @@ Last updated: 2026-10-26.
 ## Current state
 
 - Physical test phone: **Pixel 10a**, approved and controllable. It must remain untouched during current local/emulator work.
-- Phone currently reports **ghostd 0.3.8**. Working tree is **ghostd 0.4.1 / ghosta 0.2.1**.
-- **Local full verification now passes:** 254 server unit tests + `py_compile`, 154 ghostd unit tests, 115 ghosta unit tests, and release builds.
-- **Emulator:** Runs 0.4.1/0.2.1. Full E2E is **29/29 ALL GREEN**. Stored-PIN
-  unlock, locked-screen consent, fresh grants, reboot recovery and two-app
-  Remove Device also passed. The emulator was restored to an approved,
-  working state after the removal test.
+- Phone currently reports **ghostd 0.3.8**. Working tree is **ghostd 0.4.2 / ghosta 0.2.1**.
+- **Local full verification now passes:** 284 server unit tests + `py_compile`, 162 ghostd unit tests, 115 ghosta unit tests, plus 42 browser layout/interaction checks, and release builds.
+- **Emulator:** Runs ghostd 0.4.2 / ghosta 0.2.1 online over WSS. The
+  recorded 29/29 E2E, stored-PIN unlock, locked-screen consent, fresh grants,
+  reboot recovery and two-app Remove Device results were obtained on ghostd
+  0.4.1 **before** WSS. The full WSS E2E has not been rerun.
 - **Kali server:** Daemon runs normally. The console runs the previous native
   HTTPS build on :9443 with a self-signed IP certificate (expires 2029-01-27);
   external TLS and an authenticated CSRF-protected POST passed, and plain HTTP
@@ -36,8 +36,8 @@ Last updated: 2026-10-26.
 
 ## Immediate next steps — remaining hardening
 
-1. Preserve the verified 29/29 emulator result; rerun after any capture/link
-   lifecycle change.
+1. Rerun the full E2E on the emulator over WSS, then live-test online
+   `rotate-token` and `rotate-admin`.
 2. Finish the camera/mic resource-ownership audit below (close every session,
    reader and worker on stop/timeout).
 3. Replace localhost shared-secret-only peer trust with LocalSocket + peer UID
@@ -48,10 +48,10 @@ Last updated: 2026-10-26.
    cookie, `Origin: null` rejection). Rebuild/restart Kali, then re-verify
    external TLS and an authenticated CSRF POST.
 5. Finish the remaining console UI fixes: populate device model/sidekick
-   fields from daemon state and wire live screen start/polling. The isolated
-   UI branch now sends URL-encoded upload cancellation and accurately leaves
-   download progress to the browser; it still needs integration/deployment.
-   Review on a real phone browser.
+   fields from daemon state and wire live screen start/polling. The console
+   visuals branch is merged; upload cancellation and exact-path downloads are
+   fixed, and download progress is left to the browser. Review on a real phone
+   browser before deployment.
 6. Add approved-device pagination/output caps to admin list/pending paths and
    finish endpoint-cache/reconnect hardening.
 7. Replace the console's self-signed IP certificate with a CA-issued one and
@@ -425,12 +425,11 @@ do not bypass Play Protect or treat these tests as a successful self-update.
 - Consider accessibility-based low-rate live frames only after still capture
   and current live projection are stable. Do not promise invisible live capture.
 
-## Console UI checkpoint — isolated branch, not deployed (2026-10-26)
+## Console visuals — merged into main, not deployed (2026-10-26)
 
-- Branch: `codex/console-visuals`, created from committed `main` in the managed
-  `console-visuals` worktree. UI development stops at the user's requested
-  integration checkpoint. Main commit `e9a8397` is merged into this branch;
-  the original main checkout and its uncommitted work remain untouched.
+- Branch `codex/console-visuals` was merged into `main` by merge commit
+  `f39d675`; the worktree is clean. `main` includes the WSS/rotation work and
+  the backend file-path fix from `033500f`.
 - Angular dark/red styling, IBM Plex Mono and Lucide icons are bundled into
   existing UI assets, with source/license attribution in `server/ui_assets/`.
   No external asset requests, new asset routes or CSP changes are required.
@@ -458,25 +457,20 @@ do not bypass Play Protect or treat these tests as a successful self-update.
   cancellation contracts, no-JS fallback, and font loading under the production
   CSP. Browser tests are reproducible with `server/test_console_ui_browser.cjs`
   using an installed Playwright + Chrome. Real-phone Safari remains untested.
-- Known limits: this server splits folder-list command arguments at spaces;
-  the explorer explains this and preserves the prior listing. Exact-path
-  downloads still accept spaces. Device model/sidekick persistence and live-screen
-  polling/start remain unresolved. No Android or backend logic was authored in
-  this UI change; backend updates come only from merging main.
-- Post-merge verification: all 264 server unit tests pass, the browser suite
-  passes 42 responsive layouts plus the interaction checks above, and server
-  Python compilation/diff checks pass. Main `e9a8397` was integrated by merge
-  commit `c6f3b9b`; no code conflicts required changes.
-- Follow-up merge: main/origin-main `1454236` (device WSS pinning and bearer
-  token rotation) is integrated by merge commit `d6b8037`, without conflicts.
-  Post-merge checks pass: 282 server unit tests, 42 browser layout checks plus
-  interaction regressions, Python compilation and diff checks. No additional
-  UI development. Android builds/tests and on-device E2E were not rerun for
-  this merge; no deployment or push was performed.
-- UI development is stopped at this clean checkpoint. Not pushed or deployed.
-  The other agent's uncommitted Android/server work was not included or touched.
+- Known limits: the server still splits folder-list command arguments at
+  spaces; the explorer explains this and preserves the prior listing.
+  Exact-path downloads accept spaces, punctuation and non-ASCII after commit
+  `033500f`. Device model/sidekick persistence and live-screen start/polling
+  remain unresolved. No Android logic was authored by this UI change.
+- Final verification after merging `main` at `033500f`: 284 server unit tests,
+  42 browser layout/interaction checks, and Python compilation pass. Low-priority
+  UI follow-ups: saved-history results lack raw JSON details, multi-field input
+  IDs would collide if a multi-field verb is added, and the `aria-live` elapsed
+  status updates every second. Real-phone Safari remains untested.
+- Merged into `main` by `f39d675`; not pushed or deployed. The other agent's
+  uncommitted Android/server work was not included or touched.
 
-## Web console — backend deployed, UI fixes pending
+## Web console — backend deployed, merged UI not deployed
 
 Kali serves the console HTTPS-only and returns HTTP 200 over TLS; external TLS
 plus an authenticated CSRF-protected device command passed. Plain HTTP on :9443
@@ -494,9 +488,10 @@ The HTTP backend is implemented; the browser UI is not fully verified:
   daemon does not persist those hello fields.
 - The live-screen page does not start polling, and its Start action posts to a
   result page instead of a usable live view.
-- The isolated UI branch fixes Upload Cancel to use URL-encoded data for
-  `/files/abort`; that source/browser-verified change is not deployed.
-  In-page download progress/abort is not implemented or claimed in the UI.
+- The console visuals branch is merged into `main` and fixes Upload Cancel to
+  use URL-encoded data for `/files/abort`; exact-path downloads now accept
+  spaces, punctuation and non-ASCII. It is source/browser-verified but not
+  deployed. In-page download progress/abort is not implemented or claimed.
 - A real phone-sized browser and accessibility review remains.
 
 Working backend/browser pieces:
@@ -509,8 +504,9 @@ Working backend/browser pieces:
 - Settings page for enrollment flood caps, using the daemon config API.
 - Server-rendered pages plus vanilla JS, with no framework or CDN.
 
-Keep the console UI/JS/markup and its UI tests with the separate UI worktree;
-avoid concurrent edits to `server/console.py` from that worktree.
+The console UI/JS/markup and its browser tests now live on `main`; run
+`test_console_ui_browser.cjs` with Playwright + Chrome before claiming browser
+workflows verified.
 
 ## Documentation / release checklist
 

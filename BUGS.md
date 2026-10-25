@@ -11,9 +11,10 @@ Current reconciliation (2026-10-26):
   E2E portability, CLI aliases, update reconciliation/session scoping (source),
   native console HTTPS, console TLS hardening (source-tested; redeploy pending),
   WSS-only device transport with SPKI pinning/system-CA fallback, hash-only server
-  tokens, Android Keystore token storage with backup disabled, and online
-  device/admin credential rotation. Local suites: 272 server, 162 ghostd and
-  115 ghosta tests, plus `py_compile`; release builds pass.
+  tokens, Android Keystore token storage with backup disabled, online
+  device/admin credential rotation, and the console visuals merge. Local
+  suites: 284 server, 162 ghostd and 115 ghosta tests, plus `py_compile`; release
+  builds pass.
 - **Verified on the emulator:** the earlier 29/29 E2E, unlock/consent, reboot
   recovery and two-app removal on ghostd 0.4.1. ghosta OTA installed after a
   timeout; ghostd self-update remains blocked by Play Protect. ghostd 0.4.2 is
@@ -21,9 +22,12 @@ Current reconciliation (2026-10-26):
   `rotate-admin` runs are still pending.
 - **Still open:** older camera/mic resource-ownership cleanup, localhost peer
   UID/signature validation, CA-issued console certificate, approved-device
-  pagination/caps, endpoint cache/reconnect hardening, console UI browser gaps,
-  a real phone-sized UI review, and the shared enrollment key. SMS send,
-  contacts, call-log readers and WhatsApp export are unimplemented.
+  pagination/caps, endpoint cache/reconnect hardening, console model/sidekick
+  persistence, live-screen start/polling, a real phone-sized UI review, and the
+  shared enrollment key. The console visuals branch is merged into `main`; its
+  backend path fix permits exact-path downloads with spaces, punctuation and
+  non-ASCII characters. SMS send, contacts, call-log readers and WhatsApp export
+  are unimplemented.
 - **Not touched:** Pixel 10a remains on ghostd 0.3.8 and does not trust the
   WSS-only listener yet.
 
@@ -1997,7 +2001,7 @@ the top reconciliation is current. Device transport is WSS-only for
 non-loopback binds, ghostd pins the self-signed listener SPKI with a public-CA
 fallback, server tokens are hash-only, Android encrypts its token with Keystore
 and disables backup, and `rotate-token`/`rotate-admin` implement online
-rotation. Local verification is 272 server, 162 ghostd and 115 ghosta tests plus
+rotation. Local verification is 284 server, 162 ghostd and 115 ghosta tests plus
 `py_compile`; release builds pass.
 
 The emulator reconnects over WSS as ghostd 0.4.2 / ghosta 0.2.1. The recorded

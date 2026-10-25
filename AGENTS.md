@@ -38,9 +38,10 @@ Android permissions, indicators and owner-controlled setup.
 
 ## Current status (2026-10-26)
 
-- Local verification: 272 server unit tests + `py_compile`, 162 ghostd unit
-  tests, and 115 ghosta unit tests pass. Release builds pass for ghostd 0.4.2
-  (versionCode 24) and ghosta 0.2.1.
+- Local verification: 284 server unit tests + `py_compile` (including the merged
+  console UI presentation suite), 162 ghostd unit tests, and 115 ghosta unit
+  tests pass. Release builds pass for ghostd 0.4.2 (versionCode 24) and ghosta
+  0.2.1.
 - Device transport is WSS-only for non-loopback binds. ghostd accepts a public
   CA chain through the Android system store or a self-signed listener via an
   SPKI pin. Server-side device tokens are hash-only; ghostd stores its token
@@ -70,8 +71,9 @@ Android permissions, indicators and owner-controlled setup.
   after a command timeout. Do not claim unattended OTA success.
 - Console: native HTTPS runs on Kali with a self-signed IP certificate. Deploy
   the hardened `server/console.py`, install a CA-issued certificate and rotate
-  credentials. The console UI branch is under integration review; model/sidekick
-  fields and live-screen start/polling remain unfinished regardless of merge.
+  credentials. The console visuals branch is merged into `main`; model/sidekick
+  fields, live-screen start/polling, and a real phone-sized browser review
+  remain unfinished.
 - Finish the older camera/mic resource-ownership audit, approved-device
   pagination/cap hardening, and endpoint cache/reconnect hardening.
 - Replace localhost shared-secret-only trust with LocalSocket + peer UID and
@@ -178,8 +180,9 @@ python3 ghostctl.py apks add ghostd ../client-main/app/build/outputs/apk/release
 Run Python checks and the device suite:
 
 ```bash
-python3 -m py_compile daemon.py ghostctl.py console.py e2e_test.py
-python3 -m unittest -q test_daemon.py test_ghostctl.py test_console.py test_envfile.py
+python3 -m py_compile daemon.py ghostctl.py console.py console_ui.py e2e_test.py
+python3 -m unittest -q test_daemon.py test_ghostctl.py test_console.py test_console_ui.py test_envfile.py
+NODE_PATH=<playwright-node-modules> node test_console_ui_browser.cjs
 python3 e2e_test.py <approved-device-id>
 ```
 
