@@ -467,6 +467,12 @@ do not bypass Play Protect or treat these tests as a successful self-update.
   passes 42 responsive layouts plus the interaction checks above, and server
   Python compilation/diff checks pass. Main `e9a8397` was integrated by merge
   commit `c6f3b9b`; no code conflicts required changes.
+- Follow-up merge: main/origin-main `1454236` (device WSS pinning and bearer
+  token rotation) is integrated by merge commit `d6b8037`, without conflicts.
+  Post-merge checks pass: 282 server unit tests, 42 browser layout checks plus
+  interaction regressions, Python compilation and diff checks. No additional
+  UI development. Android builds/tests and on-device E2E were not rerun for
+  this merge; no deployment or push was performed.
 - UI development is stopped at this clean checkpoint. Not pushed or deployed.
   The other agent's uncommitted Android/server work was not included or touched.
 
