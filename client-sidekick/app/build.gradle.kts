@@ -17,8 +17,8 @@ android {
         applicationId = "com.tg.ghosta"
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.1.6"
+        versionCode = 3
+        versionName = "0.1.7"
     }
 
     signingConfigs {

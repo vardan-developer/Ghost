@@ -292,6 +292,14 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
 
     override fun unlock(pin: String): Map<String, Any?> {
         val steps = ArrayList<String>()
+        // 0) On a locked phone the PIN pad usually isn't up yet: the lock
+        //    screen shows clock/notifications and needs a swipe-up first.
+        //    Detect "no editable field and no digit keypad" and swipe.
+        if (!pinEntryVisible()) {
+            swipeUpFromBottom()
+            steps.add("swipe_up")
+            SystemClock.sleep(800)
+        }
         // 1) SET_TEXT the PIN into the keyguard PIN field (focused editable node)
         val node = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
             ?: rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
@@ -340,6 +348,31 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
         armed = on
         if (!on) lastAutoTapKey = ""
         return CommandRouter.ok(mapOf("armed" to armed))
+    }
+
+    /** True when the keyguard PIN entry seems on screen (editable field or
+     *  several single-digit buttons — the lock-screen keypad). */
+    private fun pinEntryVisible(): Boolean {
+        val snap = snapshot(rootInActiveWindow) ?: return false
+        val nodes = NodeTree.flatten(snap)
+        if (nodes.any { it.editable }) return true
+        val digits = nodes.count {
+            ((it.text ?: it.desc ?: "").trim().length == 1 &&
+                (it.text ?: it.desc ?: "").trim()[0] in '0'..'9')
+        }
+        return digits >= 4
+    }
+
+    /** Swipe up from the bottom center (reveals PIN entry on lock screens). */
+    private fun swipeUpFromBottom(): Boolean {
+        val metrics = resources.displayMetrics
+        val w = metrics.widthPixels
+        val h = metrics.heightPixels
+        val path = Path()
+        path.moveTo(w / 2f, h * 0.85f)
+        path.lineTo(w / 2f, h * 0.25f)
+        val stroke = GestureDescription.StrokeDescription(path, 0, 250)
+        return dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
     }
 
     override fun status(): Map<String, Any?> = CommandRouter.ok(

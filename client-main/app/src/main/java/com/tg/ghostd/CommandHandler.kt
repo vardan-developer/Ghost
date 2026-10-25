@@ -89,9 +89,18 @@ object CommandHandler {
                 JSONObject().put("cmd", "key").put("code", intArg(args, 0))
             )
             "swipe" -> swipeCmd(args)
-            "unlock" -> sidekickSend(
-                JSONObject().put("cmd", "unlock").put("pin", args.optString(0, ""))
-            )
+            "unlock" -> {
+                // Wake the display first (unlock is useless on a dark screen),
+                // give the keyguard a moment, then hand the PIN to ghosta.
+                try {
+                    SystemControl.wake(ctx)
+                } catch (_: Exception) {
+                }
+                Thread.sleep(700)
+                sidekickSend(
+                    JSONObject().put("cmd", "unlock").put("pin", args.optString(0, ""))
+                )
+            }
             "arm" -> sidekickSend(JSONObject().put("cmd", "arm"))
             "disarm" -> sidekickSend(JSONObject().put("cmd", "disarm"))
             "sidekick" -> sidekickCmd(ctx, args)
