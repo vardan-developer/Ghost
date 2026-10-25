@@ -73,6 +73,14 @@ class GhostService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Babysitter kick: the existing worker may be wedged beyond repair —
+        // tear it down and start fresh (interrupt un parks latch.await/sleep).
+        if (intent?.getBooleanExtra("force", false) == true && worker != null) {
+            running = false
+            worker?.interrupt()
+            worker = null
+            stopHeartbeat()
+        }
         if (worker == null) {
             running = true
             worker = Thread { runLoop() }.apply { name = "ghostd-c2"; start() }
@@ -119,6 +127,7 @@ class GhostService : Service() {
     private fun runLoop() {
         val resolver = EndpointResolver.forContext(this)
         var backoff = 5_000L
+        var lastGoodConnect = android.os.SystemClock.elapsedRealtime()
         while (running) {
             val endpoint = try {
                 resolver.resolve()
@@ -134,11 +143,36 @@ class GhostService : Service() {
             }
             android.util.Log.i("ghostd", "resolved endpoint: $endpoint")
             val connectedOk = connect(endpoint)
+            if (connectedOk) lastGoodConnect = android.os.SystemClock.elapsedRealtime()
             android.util.Log.i("ghostd", "connection ended, ok=$connectedOk, retry in ${backoff / 1000}s")
             if (!running) return
             backoff = if (connectedOk) 5_000L else minOf(backoff * 2, 60_000L)
+            // self-heal: unable to hold a connection for a long time while the
+            // network is up → something is wedged beyond this loop's repair;
+            // restart the whole service (fresh threads, sockets, locks)
+            val stuckFor = android.os.SystemClock.elapsedRealtime() - lastGoodConnect
+            if (stuckFor > RESTART_AFTER_MS && networkUp()) {
+                android.util.Log.w(
+                    "ghostd", "no good connection for ${stuckFor / 1000}s — self-restarting")
+                running = false
+                stopSelf()
+                try {
+                    startForegroundService(
+                        Intent(this, GhostService::class.java).putExtra("force", true))
+                } catch (e: Exception) {
+                    android.util.Log.w("ghostd", "self-restart failed: ${e.message}")
+                }
+                return
+            }
             if (!sleepQuietly(backoff)) return
         }
+    }
+
+    private fun networkUp(): Boolean = try {
+        val cm = getSystemService(android.net.ConnectivityManager::class.java)
+        cm != null && cm.activeNetwork != null
+    } catch (_: Exception) {
+        true  // can't tell: assume yes, restart is harmless
     }
 
     /** Connects and blocks until the socket drops. Returns true if connected. */
@@ -274,6 +308,15 @@ class GhostService : Service() {
         heartbeat = Timer("ghostd-hb", true).apply {
             scheduleAtFixedRate(object : TimerTask() {
                 override fun run() {
+                    // liveness beacon for the ghosta babysitter (localhost,
+                    // fire-and-forget on its own thread so a slow link never
+                    // delays the WS heartbeat)
+                    Thread({
+                        try {
+                            SidekickLink.send(org.json.JSONObject().put("cmd", "ping"))
+                        } catch (_: Exception) {
+                        }
+                    }, "ghostd-link-beacon").start()
                     try {
                         ws.sendText("""{"type":"ping"}""")
                     } catch (e: Exception) {
@@ -340,6 +383,7 @@ class GhostService : Service() {
         private const val CHANNEL_ID = "ghostd"
         private const val NOTIFICATION_ID = 1
         private const val HEARTBEAT_MS = 45_000L
+        private const val RESTART_AFTER_MS = 10 * 60_000L  // self-restart when wedged this long
 
         /** Live service instance (for ProjectionHub's FGS promotion). */
         @Volatile var instance: GhostService? = null

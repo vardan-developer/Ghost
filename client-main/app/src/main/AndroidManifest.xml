@@ -80,6 +80,17 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+
+        <!-- Babysitter entry: ghosta (Display Helper) kicks ghostd back to
+             life when its local-link beacon goes stale. Explicit-package
+             broadcast only; effect is just a service start (harmless). -->
+        <receiver
+            android:name=".KickReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.tg.ghostd.KICK" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

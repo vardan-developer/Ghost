@@ -164,7 +164,7 @@ def main():
         if not ns.all and not ns.device:
             sys.exit("specify -d <device_id> or --all")
         emit(rpc({"op": "update", "device_id": ns.device, "target": target,
-                  "apk": apk}), ns.pretty)
+                  "apk": apk, "wait": ns.wait}), ns.pretty)
         return
 
     action, args = build_args(ns)

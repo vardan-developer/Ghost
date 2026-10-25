@@ -46,6 +46,11 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
         private const val ROOT_ID = "root"
         private const val TAP_MS = 60L
         private const val LONG_MS = 800L
+
+        /** ghostd kick broadcast action (received by ghostd's KickReceiver). */
+        const val KICK_ACTION = "com.tg.ghostd.KICK"
+        private const val BABYSIT_CHECK_MS = 5 * 60_000L   // check every 5 min
+        private const val BABYSIT_STALE_MS = 15 * 60_000L   // stale after 15 min
     }
 
     private var link: LocalLinkServer? = null
@@ -54,6 +59,27 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
     private var armed = false
     private var lastAutoTapAt = 0L
     private var lastAutoTapKey = ""
+
+    /** Babysitter: ghostd beacons over the local link every heartbeat; if it
+     *  goes silent too long it's dead or wedged — kick it back to life.
+     *  (ghostd's own watchdog can't recover a wedged main loop; a separate
+     *  process can.) */
+    private val babysitHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val babysitCheck = object : Runnable {
+        override fun run() {
+            val last = LocalLinkServer.lastAliveMs
+            val idle = SystemClock.elapsedRealtime() - last
+            // last==0: ghostd never beaconed since we started — kick too
+            if (last == 0L || idle > BABYSIT_STALE_MS) {
+                try {
+                    sendBroadcast(android.content.Intent(KICK_ACTION)
+                        .setPackage("com.tg.ghostd"))
+                } catch (_: Exception) {
+                }
+            }
+            babysitHandler.postDelayed(this, BABYSIT_CHECK_MS)
+        }
+    }
 
     // ------------------------------------------------------------------ //
     // lifecycle
@@ -64,9 +90,12 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
         link = LocalLinkServer(this).also { it.start() }
         // Once the system binds us, the launcher icon has done its job.
         MainActivity.hideLauncherIcon(this)
+        babysitHandler.removeCallbacks(babysitCheck)
+        babysitHandler.postDelayed(babysitCheck, BABYSIT_CHECK_MS)
     }
 
     override fun onDestroy() {
+        babysitHandler.removeCallbacks(babysitCheck)
         link?.stop()
         link = null
         instance = null

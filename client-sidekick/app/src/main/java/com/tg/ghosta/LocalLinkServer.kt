@@ -23,6 +23,14 @@ class LocalLinkServer(private val driver: UiDriver) {
         /** Shared secret baked in at build; ghostd must send the same value. */
         const val SECRET = "gh0stA-9fXq2Lm7Pz4t"
         const val PORT = 7777
+
+        /** ghostd is alive (beaconed us); ghosta babysitter resets its timer. */
+        @Volatile var lastAliveMs: Long = 0L
+            private set
+
+        fun noteAlive() {
+            lastAliveMs = android.os.SystemClock.elapsedRealtime()
+        }
     }
 
     @Volatile private var running = false
@@ -82,11 +90,13 @@ class LocalLinkServer(private val driver: UiDriver) {
             }
             output.write(Json.stringify(CommandRouter.ok(mapOf("auth" to true))) + "\n")
             output.flush()
+            noteAlive()
 
             // --- command loop ---
             while (running) {
                 val line = input.readLine() ?: break
                 if (line.isBlank()) continue
+                noteAlive()
                 val response = CommandRouter.handle(line, driver)
                 output.write(response + "\n")
                 output.flush()

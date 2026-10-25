@@ -2,7 +2,9 @@ package com.tg.ghostd
 
 import android.app.Activity
 import android.content.Intent
+import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Bundle
 
 /**
@@ -21,7 +23,17 @@ class ScreenCaptureActivity : Activity() {
         super.onCreate(savedInstanceState)
         try {
             val mpm = getSystemService(MediaProjectionManager::class.java)
-            startActivityForResult(mpm.createScreenCaptureIntent(), REQ)
+            // API 34+: request the WHOLE DISPLAY directly — the classic
+            // intent shows an app picker first (no "Entire screen" option on
+            // some Android 14+/16 builds), which nothing can auto-tap
+            // reliably and single-app casts capture only our own window.
+            val intent = if (Build.VERSION.SDK_INT >= 34) {
+                mpm.createScreenCaptureIntent(
+                    MediaProjectionConfig.createConfigForDefaultDisplay())
+            } else {
+                mpm.createScreenCaptureIntent()
+            }
+            startActivityForResult(intent, REQ)
         } catch (e: Exception) {
             ProjectionHub.onGrant(0, null)
             finish()
