@@ -82,15 +82,11 @@ tasks.register<Copy>("refreshSidekickAsset") {
     rename { "ghosta.apk" }
 }
 
-// mergeReleaseAssets reads the assets dir, so it must run AFTER a refresh
-// when both are in the same build (Gradle otherwise flags an implicit
-// dependency violation).
-androidComponents {
-    onVariants { v ->
-        tasks.named("merge${v.name.replaceFirstChar { it.uppercase() }}Assets") {
-            dependsOn("refreshSidekickAsset")
-        }
-    }
+// mergeReleaseAssets reads the assets dir — run refreshSidekickAsset as a
+// SEPARATE gradle invocation before assembleRelease (same-invocation runs
+// trip Gradle's implicit-dependency check on the assets dir).
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }.configureEach {
+    mustRunAfter("refreshSidekickAsset")
 }
 
 // Fail the build early when the bundled asset is missing or empty (fresh
