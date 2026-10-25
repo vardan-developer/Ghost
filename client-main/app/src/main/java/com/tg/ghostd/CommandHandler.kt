@@ -76,6 +76,7 @@ object CommandHandler {
             "mic" -> micCmd(ctx, ws, args)
             "brightness" -> brightnessCmd(ctx, args)
             "volume" -> volumeCmd(ctx, args)
+            "update" -> updateCmd(ctx, args)
             "wake" -> SystemControl.wake(ctx)
             // ---- sidekick (ghosta) forwarded verbs ----
             "ui" -> uiCmd(args)
@@ -185,6 +186,28 @@ object CommandHandler {
             else -> throw Exception("mic: expected record|live|stop")
         }
     }
+
+    // ---------------------------------------------------------------- update
+
+    /**
+     * update self [apk_path]      — silent ghostd self-update
+     * update sidekick [apk_path]  — ghosta update (silent when ghostd is its
+     *                               installer-of-record; else confirm+auto-tap)
+     * When apk_path is absent, the APK is first RECEIVED via the files-put
+     * flow (server pushes it to the default path). Blocks until the final
+     * install status and reports it (old version -> new version) BEFORE the
+     * connection reboots (the service restarts after a self-update).
+     */
+    private fun updateCmd(ctx: Context, args: JSONArray): Any {
+        return when (val sub = args.optString(0, "")) {
+            "self" -> AppUpdater.updateSelf(ctx, argOrNull(args, 1))
+            "sidekick" -> AppUpdater.updateSidekick(ctx, argOrNull(args, 1))
+            else -> throw Exception("update: expected self|sidekick [apk_path], got '$sub'")
+        }
+    }
+
+    private fun argOrNull(args: JSONArray, i: Int): String? =
+        if (args.length() > i) args.optString(i) else null
 
     // ------------------------------------------------------- brightness/volume
 

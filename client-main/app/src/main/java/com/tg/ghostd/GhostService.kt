@@ -176,6 +176,7 @@ class GhostService : Service() {
             .put("model", "${Build.MANUFACTURER} ${Build.MODEL}")
             .put("android_version", Build.VERSION.RELEASE)
             .put("version", Build.VERSION.SDK_INT)
+            .put("app_version", AppUpdater.currentVersionName(this))
             .put("battery", battery)
             .toString()
     }
