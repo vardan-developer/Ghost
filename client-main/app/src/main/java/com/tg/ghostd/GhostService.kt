@@ -272,10 +272,15 @@ class GhostService : Service() {
         var denied = false
         var ws: com.neovisionaries.ws.client.WebSocket? = null
         try {
+            if (!endpoint.startsWith("wss://")) {
+                android.util.Log.e("ghostd", "refusing non-WSS endpoint")
+                return false
+            }
             val latch = CountDownLatch(1)
             forceLatch = latch
             ws = WebSocketFactory()
                 .setConnectionTimeout(10_000)
+                .setSSLContext(TlsPinning.createContext())
                 .createSocket(URI(endpoint))
             ws.addListener(object : WebSocketAdapter() {
                 override fun onConnected(
@@ -290,6 +295,21 @@ class GhostService : Service() {
 
                 override fun onTextMessage(websocket: WebSocket, text: String) {
                     lastInbound = android.os.SystemClock.elapsedRealtime()
+                    TokenRotation.parse(text)?.let { token ->
+                        val stored = Prefs.setDeviceToken(this@GhostService, token)
+                        try {
+                            websocket.sendText(TokenRotation.ack(stored))
+                        } catch (_: Exception) {
+                            // The new token is already persisted; the server
+                            // accepts it on the next hello even without an ack.
+                        }
+                        android.util.Log.i(
+                            "ghostd",
+                            if (stored) "device token rotated"
+                            else "device token rotation could not be persisted"
+                        )
+                        return
+                    }
                     HelloAck.parse(text)?.let { ack ->
                         if (!handleHelloAck(websocket, ack)) denied = true
                         return
@@ -391,7 +411,11 @@ class GhostService : Service() {
                 false
             }
             ack.isApproved || ack.isPending -> {
-                ack.token?.let { Prefs.setDeviceToken(this, it) }
+                ack.token?.let {
+                    if (!Prefs.setDeviceToken(this, it)) {
+                        android.util.Log.w("ghostd", "device token could not be encrypted/persisted")
+                    }
+                }
                 android.util.Log.i("ghostd", "hello_ack status=${ack.status}; token ${if (ack.token == null) "unchanged" else "stored"}")
                 true
             }

@@ -3,6 +3,8 @@
 
 Usage:
   ghostctl.py list | status | devices
+  ghostctl.py rotate-token <id|name>            # online bearer-token rotation
+  ghostctl.py rotate-admin                      # rotate server/admin.key online
   ghostctl.py remove <id|name> | -d <id> remove  # uninstall apps + drop record
   ghostctl.py -d <id> shell "echo hi"
   ghostctl.py -d <id> files ls|tree|get|put|abort ...
@@ -386,7 +388,12 @@ def main():
     if ns.verb == "pending" and not ns.device and not ns.all:
         safe_rpc({"op": "pending"}, ns.pretty)
         return
-    if ns.verb in ("approve", "revoke", "remove"):
+    if ns.verb == "rotate-admin":
+        if ns.device or ns.all:
+            sys.exit("rotate-admin does not take a device target")
+        safe_rpc({"op": "rotate_admin"}, ns.pretty)
+        return
+    if ns.verb in ("approve", "revoke", "remove", "rotate-token"):
         # device id via -d or as the first positional arg
         did = ns.device or (ns.rest[0] if ns.rest else None)
         if not did:
@@ -398,6 +405,9 @@ def main():
             # asks the device to run `destroy` and can take a while to report.
             req["wait"] = bounded_wait(ns.wait, 150.0)
             req["source"] = "cli"
+        elif ns.verb == "rotate-token":
+            req["op"] = "rotate_token"
+            req["wait"] = min(30.0, bounded_wait(ns.wait, 10.0))
         safe_rpc(req, ns.pretty)
         return
     if ns.verb == "rename":

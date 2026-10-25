@@ -675,6 +675,48 @@ class RemoveCliTests(unittest.TestCase):
         self.assertNotIn("remove", ghostctl.PASS_THROUGH)
 
 
+class RotateTokenCliTests(unittest.TestCase):
+    def run_main(self, argv):
+        with mock.patch.object(sys, "argv", argv):
+            return ghostctl.main()
+
+    @mock.patch("ghostctl.resolve_device", return_value="dev1")
+    @mock.patch("ghostctl.safe_rpc", return_value={"ok": True,
+                                                   "rotated": True})
+    def test_rotate_token_routes_admin_op(self, mock_safe, mock_resolve):
+        self.run_main(["ghostctl.py", "rotate-token", "Pixel 10a"])
+        mock_resolve.assert_called_once_with("Pixel 10a")
+        req = mock_safe.call_args[0][0]
+        self.assertEqual(req["op"], "rotate_token")
+        self.assertEqual(req["device_id"], "dev1")
+        self.assertEqual(req["wait"], 10.0)
+        self.assertNotIn("action", req)
+
+    @mock.patch("ghostctl.resolve_device", return_value="dev1")
+    @mock.patch("ghostctl.safe_rpc", return_value={"ok": True})
+    def test_rotate_token_wait_is_capped_at_server_limit(self, mock_safe,
+                                                         mock_resolve):
+        self.run_main(["ghostctl.py", "-d", "dev1", "--wait", "300",
+                       "rotate-token"])
+        self.assertEqual(mock_safe.call_args[0][0]["wait"], 30.0)
+
+    def test_rotate_token_requires_device(self):
+        with self.assertRaises(SystemExit) as cm:
+            self.run_main(["ghostctl.py", "rotate-token"])
+        self.assertIn("specify device id", str(cm.exception))
+
+    @mock.patch("ghostctl.safe_rpc", return_value={"ok": True,
+                                                   "rotated": True})
+    def test_rotate_admin_routes_admin_op(self, mock_safe):
+        self.run_main(["ghostctl.py", "rotate-admin"])
+        self.assertEqual(mock_safe.call_args[0][0], {"op": "rotate_admin"})
+
+    def test_rotate_admin_rejects_device_target(self):
+        with self.assertRaises(SystemExit) as cm:
+            self.run_main(["ghostctl.py", "-d", "dev1", "rotate-admin"])
+        self.assertIn("does not take a device target", str(cm.exception))
+
+
 class FilesPutTests(unittest.TestCase):
     def run_main(self, argv):
         with mock.patch.object(sys, "argv", argv):
