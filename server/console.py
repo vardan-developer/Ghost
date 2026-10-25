@@ -88,8 +88,7 @@ STREAM_TOKEN_TTL = 300.0    # seconds
 
 # Device id validation: safe URL/HTML/JS charset.
 DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
-# Download path validation: no traversal, no absolute escapes.
-PATH_RE = re.compile(r"^[A-Za-z0-9_./-]{1,512}$")
+MAX_PATH_LEN = 512
 
 MAX_BODY = 1 * 1024 * 1024          # 1 MiB for normal POSTs
 MAX_UPLOAD = 64 * 1024 * 1024       # 64 MiB for file uploads
@@ -303,7 +302,12 @@ def _valid_device_id(did):
 
 
 def _valid_path(path):
-    if not path or not PATH_RE.match(path):
+    # Device filenames may contain spaces, punctuation and non-ASCII text.
+    # Reject control characters and traversal rather than restricting the
+    # filename charset, so exact-path downloads match what `files ls` returns.
+    if not isinstance(path, str) or not 1 <= len(path) <= MAX_PATH_LEN:
+        return False
+    if not all(c.isprintable() for c in path):
         return False
     if ".." in path or "\\" in path:
         return False

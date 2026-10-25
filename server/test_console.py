@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import unittest
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
+from urllib.parse import urlencode
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import console  # noqa: E402
@@ -597,6 +598,27 @@ class TestConsole(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertEqual(body, b"file-content")
             self.assertIn("attachment", headers.get("content-disposition", ""))
+
+    def test_file_download_path_with_spaces_and_unicode(self):
+        # Exact-path downloads must accept names returned by `files ls`,
+        # including spaces, parentheses, plus and non-ASCII characters.
+        path = "/sdcard/Download/Scope notes (final) + café.txt"
+        payload = base64.b64encode(b"named-file").decode()
+        query = urlencode({"device_id": "abc", "path": path})
+        with patch("console._rpc_files_get",
+                   return_value={"ok": True, "data": payload}) as m:
+            status, headers, body = self.request(
+                "GET", "/files/download?" + query)
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"named-file")
+        self.assertIn("attachment", headers.get("content-disposition", ""))
+        self.assertEqual(m.call_args[0][1], path)
+
+    def test_file_download_rejects_control_characters(self):
+        query = urlencode({"device_id": "abc",
+                           "path": "/sdcard/bad\nname.txt"})
+        status, _, _ = self.request("GET", "/files/download?" + query)
+        self.assertEqual(status, 400)
 
     def test_file_download_error(self):
         with patch("console._rpc_files_get", return_value={"ok": False, "error": "not found"}):
