@@ -257,6 +257,10 @@ def save_json(path, data):
 class Daemon:
     def __init__(self):
         self.devices = load_json(STATE_FILE, {})  # device_id -> status dict
+        # connections die with the process: never trust a persisted "online"
+        for d in self.devices.values():
+            if isinstance(d, dict):
+                d["online"] = False
         self.history = load_json(HISTORY_FILE, [])
         self.conns = {}    # device_id -> websocket
         self.pending = {}  # cmd_id -> {"event","result","ok"}
