@@ -41,6 +41,24 @@ test target: iQOO Z5 (FunTouch OS 13 / Android 13).
 - Restart: system auto-rebinds accessibility service; also sticky + boot
   receiver.
 
+### Dynamic UI driving (no hardcoded flows)
+The sidekick app is GENERIC: it does not hardcode any app-specific flows.
+It exposes a remote element-inspection API:
+- `ui dump` — returns the current accessibility node tree as JSON (element id,
+  text, description, bounds, clickable, class)
+- `ui find --text/--id` — search the live tree
+- `tap <id|x,y>`, `type <text>`, `key <code>`, `swipe <x1,y1,x2,y2>`,
+  `unlock <pin>` (lockscreen PIN entry)
+The operator (human or AI agent) inspects the tree and decides what to tap —
+so new apps/flows (2FA prompts, exports, logins) need zero code changes.
+`auth approve`, `passwords dump`, `wa dump`, `wa link` are all just
+sequences of these generic verbs driven from the server.
+
+### Sidekick local link
+Sidekick listens on a localhost TCP socket (127.0.0.1) with a shared
+secret; ghostd connects and forwards the generic UI verbs. No internet
+exposure.
+
 ### Night-control flow (screen stealth)
 - Wake screen, start MediaProjection (dialog auto-tapped by sidekick),
 - brightness → minimum (AMOLED near-invisible in dark), force dark theme,
