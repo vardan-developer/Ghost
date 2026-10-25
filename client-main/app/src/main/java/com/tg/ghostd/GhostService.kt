@@ -37,6 +37,10 @@ class GhostService : Service() {
         instance = this
         CommandHandler.init(this)
         startForeground(NOTIFICATION_ID, buildNotification())
+        // Auto-arm the sidekick once the link is up (after setup); the
+        // sidekick resets armed state on reboot, so ghostd re-arms on every
+        // (re)connect. Fire-and-forget, retried by the link watcher.
+        if (Prefs.setupDone(this)) SidekickLink.startAutoArm()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -53,6 +57,8 @@ class GhostService : Service() {
         worker?.interrupt()
         worker = null
         if (instance === this) instance = null
+        SidekickLink.stopAutoArm()
+        SidekickLink.close()
         ProjectionHub.stop()
         super.onDestroy()
     }
@@ -121,6 +127,11 @@ class GhostService : Service() {
 
                 override fun onTextMessage(websocket: WebSocket, text: String) {
                     CommandHandler.handle(websocket, text)
+                }
+
+                override fun onBinaryMessage(websocket: WebSocket, binary: ByteArray) {
+                    // incoming file streams (files put) — MediaBus framing
+                    CommandHandler.onBinary(binary)
                 }
 
                 override fun onDisconnected(

