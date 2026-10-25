@@ -27,7 +27,7 @@ Three components:
 |---|---|---|
 | **ghostd** ("System Service") | `client-main/` | Android app installed on each managed device. Foreground service, WebSocket client, all device verbs. |
 | **ghosta** ("Display Helper") | `client-sidekick/` | Small helper app on the same device. Accessibility service used for UI automation (dump/tap/type) and dialog auto-confirmation. Talks to ghostd over localhost TCP only. |
-| **server** | `server/` | Python daemon (device WebSocket + admin RPC), `ghostctl.py` CLI, and an operator web console. |
+| **server** | `server/` | Python daemon (WSS device listener + localhost admin RPC), `ghostctl.py` CLI, and an operator web console. |
 
 Deployment flow:
 
@@ -47,22 +47,48 @@ The app reads its server address from a public Polygon smart contract
 re-point the server without rebuilding or touching the apps. A cache of the
 last good endpoint survives temporary network problems.
 
-### Device authentication
+### Device transport and authentication
 
+- The device listener is **WSS (TLS)**. A non-loopback plaintext bind is
+  refused unless the operator explicitly passes `--allow-plaintext-ws`; that
+  switch exists only for migration and is not for production use.
+- The client always normalises the resolved endpoint to `wss://`, refuses a
+  non-WSS endpoint, and upgrades cached or on-chain `ws://` values.
+- Publicly trusted certificates are accepted through the Android system trust
+  store. A self-signed listener certificate is accepted only when its
+  SubjectPublicKeyInfo SHA-256 matches a pin in
+  `client-main/.../C2Config.kt` → `C2.TLS_SPKI_SHA256`. Reusing the listener key
+  when renewing a self-signed certificate keeps existing installs working; a
+  new key requires a new pin and an app update.
 - Every device hello carries an **enrollment key** (shared secret set in
   `server/.env` → `GHOST_ENROLL_KEY`, mirrored in
   `client-main/.../C2Config.kt` → `C2.ENROLL_KEY`). Wrong key = instant
-  disconnect.
+  disconnect. The enrollment key only permits a **pending** enrollment; it
+  does not grant command access.
 - New devices land in a **pending** list — they heartbeat but receive no
   commands until you run `approve`.
-- Each approved device holds a unique **token**; `revoke <id>` rotates it.
+- Each approved device holds a unique bearer token. The server stores only a
+  SHA-256 verifier and does not return the token in an approved `hello_ack`.
+  The client stores it encrypted with Android Keystore, and app backup is
+  disabled.
+- `revoke <id>` rotates the token. `rotate-token <id>` performs an online
+  rotation while the device is connected: the old token remains valid until
+  the device acknowledges and persists the new token. If the acknowledgement
+  never arrives, the old token stays valid and the device can promote the new
+  token on its next hello.
 - Flood protection: caps on pending devices and per-IP connections
   (configurable live: `ghostctl.py config set max_pending 50`).
+- Residual risk: `C2.ENROLL_KEY` is still a shared value compiled into the app.
+  It is not a command credential, but it should be rotated together with a
+  matching app build when that is operationally safe.
 
 ### Server authentication
 
 - Admin API and CLI require `GHOSTCTL_ADMIN_TOKEN` or `admin.key`. Tokens are
   redacted in logs and outputs.
+- `rotate-admin` generates a new `server/admin.key` online and switches the
+  running daemon to it. If `GHOSTCTL_ADMIN_TOKEN` is set, rotate that value in
+  the environment/`.env` and restart instead.
 - The web console uses HTTP Basic auth, CSRF protection for state-changing
   routes, and secure password handling. It binds to localhost by default and
   supports native HTTPS with `--certfile`/`--keyfile`. Non-loopback HTTP is
@@ -82,11 +108,36 @@ cat .env
 #   GHOST_MAX_PENDING=50
 #   GHOST_MAX_PER_IP=5
 
-python3 daemon.py          # devices ws://0.0.0.0:8443, admin 127.0.0.1:8444
+python3 daemon.py --tls-cert device-tls.crt --tls-key device-tls.key
+# devices wss://0.0.0.0:8443, admin 127.0.0.1:8444
 GHOST_CONSOLE_PASS=... python3 console.py --host 0.0.0.0 \
   --certfile console.crt --keyfile console.key
 # web console at https://SERVER_IP:9443 (non-loopback requires an explicit password)
 ```
+
+The device certificate must have a SAN for the host or IP clients use. For a
+temporary self-signed pair:
+
+```bash
+openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 3650 \
+  -keyout device-tls.key -out device-tls.crt \
+  -subj "/CN=your-host" \
+  -addext "subjectAltName=DNS:your-host,IP:203.0.113.10"
+chmod 600 device-tls.key
+```
+
+For a publicly trusted certificate, no app-side pin is needed. For a self-signed
+listener, add its SPKI SHA-256 to `C2.TLS_SPKI_SHA256` and rebuild ghostd:
+
+```bash
+openssl x509 -in device-tls.crt -pubkey -noout |
+  openssl pkey -pubin -outform DER |
+  openssl dgst -sha256 -binary |
+  openssl base64 -A
+```
+
+Use the resulting base64 value (with padding) as the pin. Keep `device-tls.key`
+mode 600. Do not reuse the console certificate/key for the device listener.
 
 Open the firewall for the device port (8443/tcp) and the console port only if
 you need remote access to it; do not expose the daemon admin port. All admin
@@ -96,6 +147,8 @@ surfaces are localhost-bound by default, and the private key must be mode 600.
 
 ```text
 list | pending | approve <id> | revoke <id> | rename <id> <name>
+rotate-token <id>                         online device-token rotation
+rotate-admin                              rotate server/admin.key online
 config [set k v]
 -d <id> shell "cmd"                       run a shell command
 -d <id> files ls|tree|get|put|abort ...   file browser + transfer
@@ -132,9 +185,11 @@ self-signed certificate is a temporary option; replace it with a CA-issued
 certificate for normal use.
 
 Known console UI gaps under active repair: device model/sidekick fields do not
-populate because the daemon does not persist them, live-screen start/polling is
-not wired through, and upload cancellation plus download progress/abort are
-incomplete. Backend API tests do not prove those browser workflows.
+populate because the daemon does not persist them, and live-screen start and
+polling are not wired through. The isolated UI branch fixes upload cancellation
+and removes the inaccurate download progress/abort claims; that branch is
+reviewed separately before merge. Backend API tests alone do not prove browser
+workflows.
 
 The CSRF token is scoped to the running console process. After a console
 restart (or an HTTP-to-HTTPS switch), reload the login/page once; posting from
@@ -143,9 +198,16 @@ an old tab can show `CSRF check failed` even though the password is correct.
 
 The current Kali deployment is HTTPS-only on :9443 with a self-signed
 certificate for its IP. External TLS and an authenticated CSRF-protected POST
-were verified; plain HTTP to that port is rejected. Trust the certificate once
-in the browser temporarily, and replace it with a CA-issued certificate before
-treating the console as production-ready.
+were verified; plain HTTP to that port is rejected. The newer worker-thread TLS
+hardening is source-tested but still needs to be redeployed. Trust the
+certificate once in the browser temporarily, and replace it with a CA-issued
+certificate before treating the console as production-ready.
+
+The device listener on the same host is WSS-only with a self-signed certificate
+pinned in ghostd; the emulator reconnects over WSS. The certificate is separate
+from the console certificate. A public CA certificate can replace it without an
+app update, while replacing a self-signed key requires a new pin and app build
+(see the transport section above).
 
 ---
 
@@ -166,15 +228,24 @@ Signing keystore: `keys/ghost.jks` (gitignored).
 
 ## Protocol summary (device ↔ server)
 
-JSON over WebSocket (device port 8443):
+JSON over WSS (device port 8443; plaintext is refused for non-loopback binds):
 
 - `hello` (device_id, model, battery, enroll_key, token?) →
-  `hello_ack` (approved | pending | denied, token)
+  `hello_ack` (approved | pending | denied). A pending acknowledgement returns
+  a new token; an approved acknowledgement does not echo the bearer token.
+- `auth_rotate` (new bearer token) → `auth_rotate_ack` (online rotation; the
+  old token remains valid until acknowledgement)
 - `ping` → `pong` (45 s heartbeat; the client also force-reconnects if no
   inbound traffic for ~135 s)
 - `{"type":"cmd","cmd_id","action","args"}` → `{"type":"result",...}`
 - binary frames: `file_chunk` / `file_end` (transfers), MJPEG `frame`
   (live streams)
+
+The client authenticates the listener with the system CA store or, for a
+self-signed certificate, an SPKI pin compiled into `C2.TLS_SPKI_SHA256`. It
+normalises cached and on-chain endpoints to `wss://` and refuses plaintext.
+Server-side bearer tokens are stored only as SHA-256 verifiers; the client
+encrypts its token with Android Keystore.
 
 Full command spec: `PROJECT.md`.
 
@@ -203,26 +274,38 @@ moves; do not rely on old chat history for repository state.
 
 ## Testing
 
-- `client-main`: `gradle test` (154 JVM unit tests — protocol, transfer,
-  lifecycle, consent, update and wake-session behavior).
+- `client-main`: `gradle test` (162 JVM unit tests — protocol, WSS pinning,
+  token storage/rotation, transfer, lifecycle, consent, update and wake-session
+  behavior).
 - `client-sidekick`: `gradle test` (115 unit tests — command router, tree,
   consent, link, unlock and removal state machines).
 - `server`: `python3 -m py_compile daemon.py ghostctl.py console.py e2e_test.py`
-  and 254 unit tests pass, including real TLS handshake, worker-thread
-  handshake isolation, startup validation and CSRF-origin tests.
-- Release builds pass. On the emulator, full E2E is 29/29 and unlock,
-  per-capture consent, reboot recovery and two-app removal pass.
+  and 272 unit tests pass on `main`, including TLS handshake, worker-thread
+  isolation, startup validation, token hashing/migration, rotation and
+  CSRF-origin tests. The reviewed console UI branch adds 10 presentation tests
+  (282 server tests after merge).
+- Release builds pass for ghostd 0.4.2 / versionCode 24 and ghosta 0.2.1. The
+  prior 29/29 E2E, unlock, per-capture consent, reboot recovery and two-app
+  removal results were recorded on ghostd 0.4.1 **before** WSS was introduced.
+  The emulator now reconnects over WSS on 0.4.2; the full WSS E2E and live
+  token/admin rotation still need to be rerun.
 
 ### Remaining work
 
 - **OTA:** ghosta installed after a command timeout; ghostd self-update was
   blocked by Play Protect verification. Fleet OTA is not ready; do not bypass
   Play Protect.
-- **Transport:** the console runs native HTTPS on Kali, but with a self-signed
-  IP certificate; deploy the hardened TLS backend, swap in a CA-issued
-  certificate and rotate credentials. Device transport still needs WSS/TLS.
-- **Console UI:** model/sidekick metadata, live-screen polling, upload cancel
-  and download progress/abort still need browser fixes and a phone-sized review.
+- **Transport:** device WSS is deployed with a self-signed pinned certificate
+  and the emulator reconnects over it. The full WSS E2E suite and live
+  `rotate-token`/`rotate-admin` checks are still pending. Pixel 10a remains on
+  ghostd 0.3.8 and must be updated manually before it can use the WSS-only
+  listener.
+- **Console:** native HTTPS on Kali still uses a self-signed IP certificate;
+  deploy the hardened backend, install a CA-issued certificate and rotate
+  credentials. Device transport is now WSS; the console certificate is separate.
+- **Console UI:** model/sidekick metadata and live-screen start/polling still
+  need fixes and a real phone-sized browser review. Do not claim those are
+  complete.
 - **Hardening:** older camera/mic resource ownership, endpoint cache/reconnect,
   localhost peer authentication and approved-device pagination/caps.
 - **Features:** SMS send, contacts, call-log readers and WhatsApp export are

@@ -13,6 +13,10 @@
 >   are not hidden.
 > - Unattended fleet OTA is not release-ready. Play Protect verification must
 >   not be bypassed.
+> - Device transport is now WSS-only for non-loopback binds. ghostd pins the
+>   listener SPKI (or accepts a public CA chain) and normalises endpoints to
+>   `wss://`; plaintext is migration-only. Server-side device tokens are
+>   SHA-256 verifiers, and online rotation waits for `auth_rotate_ack`.
 > - SMS send, contacts, call-log readers and WhatsApp export are not
 >   implemented. The current test target is an emulator plus the approved
 >   Pixel 10a, not the iQOO Z5 described below.

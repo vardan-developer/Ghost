@@ -3,12 +3,14 @@
 Core daemon + CLI for the ghostctl Android remote-control toolset (see ../PROJECT.md).
 
 ## Files
-- `daemon.py` — core daemon: WebSocket device listener (default `0.0.0.0:8443`),
+- `daemon.py` — core daemon: WSS device listener (default `0.0.0.0:8443`),
   device registry (`state.json`), command router + history (`history.json`),
   admin JSON-RPC on `127.0.0.1:8444` (CLI transport), per-device live-stream
   frame cache (`StreamCache`), server→device file push (`files put` framing)
   and the `update self|sidekick` APK push flow. Admin authentication uses
   `GHOSTCTL_ADMIN_TOKEN`/`admin.key`; tokens are redacted in logs and outputs.
+  Device tokens are persisted as SHA-256 verifiers. A non-loopback plaintext
+  bind is refused unless `--allow-plaintext-ws` is passed for migration.
 - `ghostctl.py` — CLI (symlink-friendly, e.g. `ln -s .../ghostctl.py ~/.local/bin/ghostctl`).
 - `console.py` — web console (see below).
 - `fake_client.py` — mock Android client for testing (echoes verbs, receives
@@ -18,14 +20,27 @@ Core daemon + CLI for the ghostctl Android remote-control toolset (see ../PROJEC
 
 ## Run
 ```sh
-python3 daemon.py                     # defaults: 0.0.0.0:8443, admin 127.0.0.1:8444
-python3 daemon.py --port 9000 --admin-port 9001
+python3 daemon.py --tls-cert device-tls.crt --tls-key device-tls.key
+# devices wss://0.0.0.0:8443, admin 127.0.0.1:8444
+python3 daemon.py --port 9000 --admin-port 9001 \
+  --tls-cert device-tls.crt --tls-key device-tls.key
+python3 daemon.py --bind 127.0.0.1          # loopback test only; plaintext allowed
 ```
+
+The device listener requires TLS for non-loopback binds. Use a certificate with
+a SAN matching the host/IP clients use. ghostd accepts a public CA chain or the
+SPKI pin in `C2.TLS_SPKI_SHA256`; for a self-signed listener, compute the pin
+from the certificate and rebuild the app. Reuse the listener key when renewing
+the certificate so existing pins remain valid. Keep the key mode 600 and keep
+both certificate and key out of git. Do not use `--allow-plaintext-ws` on Kali
+or in production.
 
 ## CLI
 ```sh
 python3 ghostctl.py list                                       # device registry (JSON)
 python3 ghostctl.py streams                                    # live stream frame cache
+python3 ghostctl.py rotate-token test-1                        # online token rotation
+python3 ghostctl.py rotate-admin                               # rotate server/admin.key online
 python3 ghostctl.py -d test-1 shell "echo hi"               # per-device command
 python3 ghostctl.py -d test-1 files ls /sdcard
 python3 ghostctl.py -d test-1 files tree /sdcard --depth 3
@@ -62,6 +77,10 @@ python3 ghostctl.py --pretty list                           # human-readable
 ```
 Unknown verbs are rejected with a clean error (daemon whitelist `ACTIONS`).
 Admin endpoint configurable via `GHOSTCTL_ADMIN_HOST` / `GHOSTCTL_ADMIN_PORT`.
+`rotate-token` requires an online approved device and leaves the old token valid
+until the device acknowledges the replacement. `rotate-admin` rewrites
+`admin.key` and switches the running daemon; if `GHOSTCTL_ADMIN_TOKEN` is set,
+rotate the environment value and restart instead.
 
 ## Update push
 `ghostctl.py -d <id> update self|sidekick [--apk path]` pushes the APK to the
@@ -143,14 +162,21 @@ history is fetched through the daemon's `history` admin operation.
 Current deployment: Kali runs this console HTTPS-only on :9443 with a
 self-signed certificate for its IP, so browsers require a one-time trust
 exception. External TLS and an authenticated CSRF-protected POST were verified;
-plain HTTP on :9443 is rejected. Replace the certificate with a CA-issued one
-for normal use. Device transport (:8443) remains `ws://` until the documented
-WSS migration is done; do not treat console HTTPS as device-transport TLS.
+plain HTTP on :9443 is rejected. The worker-thread TLS hardening in this tree is
+source-tested but has not yet been redeployed. Replace the console certificate
+with a CA-issued one for normal use.
+
+Device transport on :8443 is WSS-only with a separate self-signed certificate
+pinned in ghostd; the emulator reconnects over it. Console HTTPS does not imply
+device TLS: they are independent certificates and keys. Do not downgrade the
+device listener to plaintext.
 
 ## Test
 ```sh
-python3 daemon.py &                 # or use --bind 127.0.0.1
-python3 fake_client.py test-1 &      # mock device
+python3 -m py_compile daemon.py ghostctl.py console.py e2e_test.py
+python3 -m unittest -q test_daemon.py test_ghostctl.py test_console.py test_envfile.py
+python3 daemon.py --bind 127.0.0.1 &     # loopback-only plaintext for fake clients
+python3 fake_client.py test-1 &          # mock device
 python3 ghostctl.py list
 python3 ghostctl.py -d test-1 shell "echo hi"
 python3 ghostctl.py -d test-1 tap 100 200       # routed verb
@@ -162,5 +188,12 @@ python3 ghostctl.py apks add ghosta dummy.apk
 python3 ghostctl.py -d test-1 update sidekick   # push + install (sha256-checked)
 ```
 
+The full device suite is `python3 e2e_test.py <approved-device-id>` and must be
+run over WSS against an approved emulator after transport changes. The UI branch
+adds `test_console_ui.py` (presentation) and `test_console_ui_browser.cjs`
+(Playwright + local Chrome); do not claim browser workflows verified from the
+Python suite alone.
+
 Requires `websockets` (`pip install --user websockets`). Do not commit
-`state.json` / `history.json` / `apks/` (runtime artifacts, see `.gitignore`).
+`state.json` / `history.json` / `apks/` / TLS private keys (runtime artifacts,
+see `.gitignore`).

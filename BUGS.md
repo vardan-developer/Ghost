@@ -9,15 +9,23 @@ Current reconciliation (2026-10-26):
 - **Fixed and tested:** file-transfer ownership, server/console/CLI audit items,
   MediaProjection per-capture consent and latch/activity cleanup, endpoint
   E2E portability, CLI aliases, update reconciliation/session scoping (source),
-  native console HTTPS, and the TLS hardening listed in the addendum.
-- **Verified on the emulator:** 29/29 E2E, unlock/consent, reboot recovery and
-  two-app removal. ghosta OTA installed after a timeout; ghostd self-update
-  remains blocked by Play Protect.
+  native console HTTPS, console TLS hardening (source-tested; redeploy pending),
+  WSS-only device transport with SPKI pinning/system-CA fallback, hash-only server
+  tokens, Android Keystore token storage with backup disabled, and online
+  device/admin credential rotation. Local suites: 272 server, 162 ghostd and
+  115 ghosta tests, plus `py_compile`; release builds pass.
+- **Verified on the emulator:** the earlier 29/29 E2E, unlock/consent, reboot
+  recovery and two-app removal on ghostd 0.4.1. ghosta OTA installed after a
+  timeout; ghostd self-update remains blocked by Play Protect. ghostd 0.4.2 is
+  now online over WSS, but the full WSS E2E and live `rotate-token` /
+  `rotate-admin` runs are still pending.
 - **Still open:** older camera/mic resource-ownership cleanup, localhost peer
-  UID/signature validation, device-transport WSS/TLS, CA-issued console
-  certificate, approved-device pagination/caps, endpoint cache/reconnect
-  hardening, console UI browser gaps and a real phone-sized UI review. SMS send,
+  UID/signature validation, CA-issued console certificate, approved-device
+  pagination/caps, endpoint cache/reconnect hardening, console UI browser gaps,
+  a real phone-sized UI review, and the shared enrollment key. SMS send,
   contacts, call-log readers and WhatsApp export are unimplemented.
+- **Not touched:** Pixel 10a remains on ghostd 0.3.8 and does not trust the
+  WSS-only listener yet.
 
 Do not copy an audit paragraph into a release claim without checking the
 current source and `BACKLOG.md`.
@@ -389,11 +397,20 @@ I did **not** audit `GhostService.kt`, `FileReceiver.kt`, `CommandHandler.kt`, `
 | 17 | **Low/latent** | `startAutoArm()` on an already-connected link never re-arms the sidekick | `SidekickLink.startAutoArm` | Latent |
 | 18 | **Low** | `close()`/`isConnected()` can block behind a 10–20 s `send()` | `SidekickLink.close`/`isConnected`/`send` | Latent |
 
+The table's status column is historical. See the dated status notes on findings
+1, 8, 12 and F9, and the current reconciliation at the top.
+
 ---
 
 ## Critical
 
 ### 1. C2 transport is plaintext `ws://`, and `hello` contains a static enroll key plus the device token
+
+> **Status 2026-10-26:** resolved in commit `1454236`. Device transport is
+> WSS-only for non-loopback binds, ghostd normalises endpoints to `wss://` and
+> pins the listener SPKI (or trusts a public CA), server tokens are SHA-256
+> verifiers, and Android stores its token with Keystore. The shared enrollment
+> key remains a residual risk (see F9).
 
 **Severity:** Critical — proven.
 **Files/functions:**
@@ -664,6 +681,11 @@ override fun run() {
 
 ### 8. `allowBackup=true` plus plaintext device token; PIN blob backup/stale-keystore lifecycle
 
+> **Status 2026-10-26:** partially resolved. The manifest now sets
+> `allowBackup="false"` and the device token is encrypted with Android
+> Keystore. The PIN lifecycle portion (`hasPin`/`pin`/`clearPin`/`setPin`) still
+> matches this report and remains open.
+
 **Severity:** High — proven configuration; impact depends on whether device backup is enabled.
 **Files/functions:**
 - `client-main/app/src/main/java/com/tg/ghostd/Prefs.kt` → `deviceToken()`/`setDeviceToken()`/`clearDeviceToken()` (lines 44–53), `setPin()`/`pin()`/`hasPin()`/`clearPin()` (lines 68–101)
@@ -795,6 +817,9 @@ Even with `wss://`, the attacker can obtain a valid certificate for their endpoi
 ---
 
 ### 12. `HelloAck.parse` coerces JSON `null` token to `"null"`; status is not trimmed/validated
+
+> **Status 2026-10-26:** still open. Current `HelloAck.parse` remains
+> vulnerable to the `"null"` sentinel and should be validated as described.
 
 **Severity:** Medium — proven parser behavior; current server normally sends only the three known statuses.
 **File/function:** `client-main/app/src/main/java/com/tg/ghostd/HelloAck.kt` → `parse()` (lines 32–40).
@@ -1174,6 +1199,10 @@ Below, **Confirmed** means the defect is visible in the code as written; **Harde
 **Smallest fix:** compute `is_new = did not in self.devices` (or `not rec`) and enforce `if is_new and len(self.pending_ids()) >= self.config["max_pending"]: deny`; create the record only after the check passes. Because `handle_hello` currently has no `await`s, doing the check and record creation synchronously there also closes the check-vs-touch race described in G4. Fix A4 first, or the empty-record inflation will cause false denials.
 
 ### A6. Revoke does not close the device connection or clear its stream cache — **Medium-High, Confirmed**
+
+> **Status 2026-10-26:** fixed in the revocation path. `_revoke_access` closes
+> the socket, drops streams and transfers, fails outstanding commands, rotates
+> the token and marks the device unapproved.
 `daemon.py` `admin_dispatch` "revoke" (lines 612-620).
 
 **Failure:** An operator revokes a compromised device. `touch(..., approved=False, token=new_token)` updates the registry, but the device's existing websocket remains in `self.conns`, remains "online" in the console, and can keep sending `ping`/`info`/`result`/`stream_*`. Its cached camera/screen stream continues to be served by `stream_frame` until the device itself disconnects. The token rotation only prevents a future reconnect.
@@ -1188,6 +1217,10 @@ Below, **Confirmed** means the defect is visible in the code as written; **Harde
 **Smallest fix:** register and update state synchronously *before* sending the ack: decide in `handle_hello`, then `old = self.conns.get(did); self.conns[did] = ws; self.touch(...)` (no await between), close the old (A1), then `await ws.send(ack)`. The `finally` still cleans up if the send fails. The approved-vs-enroll decision is then atomic with the registry update.
 
 ### A8. Enroll-key hello can de-approve an approved device without closing its active connection — **Medium-High, Confirmed + design risk**
+
+> **Status 2026-10-26:** fixed. An approved device re-enrolling with only the
+> shared key is denied; token loss requires explicit `revoke` and re-approval.
+> The shared enrollment key remains a residual risk (see F9).
 `daemon.py` `handle_hello` enroll path (lines 477-488) and `touch` at hello (lines 528-534).
 
 **Failure:** A device loses its token and re-enrolls with the valid enroll key. `handle_hello` returns `pending` with a new token; `touch` sets `approved=False` and overwrites the token. The already-approved connection is not closed. The operator's next command fails "pending approval"; the device is effectively cut off until re-approved. Conversely, an attacker holding the shared enroll key can open a second session for an approved device and force it into pending — a targeted DoS/confusion. If the two hellos race (A7), the final state is non-deterministic.
@@ -1481,6 +1514,11 @@ Below, **Confirmed** means the defect is visible in the code as written; **Harde
 **Smallest fix:** require the first message to be a hello within N seconds (e.g., `await asyncio.wait_for(ws.recv(), timeout=10)` for the first message, or a timer task that closes non-hello connections); reduce `ping_interval`/`ping_timeout`; pre-hello, drop messages larger than a small threshold before parsing. Small.
 
 ### F9. No TLS on device port (`ws://`) and shared global enroll key — **High if internet-exposed, Hardening**
+
+> **Status 2026-10-26:** TLS portion resolved. The device port is WSS-only for
+> non-loopback binds, with SPKI pinning/system-CA trust and online token
+> rotation. The enrollment key is still a shared compiled value; rotate it with
+> a matching app build.
 `daemon.py` `main` default `--bind 0.0.0.0` (line 678), `run` (lines 668-669), `handle_hello` enroll comparison (lines 479-480).
 
 **Failure:** The device port binds all interfaces by default without TLS. A passive network attacker captures a device's hello, obtaining its token or the enroll key. The enroll key is a single global secret; possession allows enrolling new devices (subject to the corrected MAX_PENDING) and triggering the enroll-key de-approval path (A8) against approved devices. There is no per-device binding or key rotation in the protocol.
@@ -1943,11 +1981,29 @@ scheme-correct CSRF origins with `Origin: null` rejected, and HSTS plus a
 `Secure` CSRF cookie when native HTTPS is active. Tests include a real OpenSSL
 handshake, an idle-connection isolation check, plain-HTTP rejection on the TLS
 port, unsafe-key rejection, startup failure without a traceback, and HTTPS
-cookie/HSTS headers. Still open or deployment-dependent: redeploying the
-hardened backend and re-verifying externally, device-transport WSS/TLS and
-credential rotation, production file/directory permissions, approved-device
-pagination/cap hardening, the older camera/mic resource audit, endpoint
-cache/reconnect and localhost peer-authentication hardening, long-idle
-availability, and a real phone-sized console review (including the known UI
-polling/cancel/download gaps in `BACKLOG.md`). SMS send, contacts, call-log
-readers and WhatsApp export remain unimplemented.
+cookie/HSTS headers. Open at that date: redeploying the hardened backend and
+re-verifying externally, device-transport WSS/TLS and credential rotation,
+production file/directory permissions, approved-device pagination/cap
+hardening, the older camera/mic resource audit, endpoint cache/reconnect and
+localhost peer-authentication hardening, long-idle availability, and a real
+phone-sized console review (including the known UI polling/cancel/download gaps
+in `BACKLOG.md`). SMS send, contacts, call-log readers and WhatsApp export remain
+unimplemented.
+
+# Security/transport addendum — 2026-10-26
+
+The WSS and credential work landed in commit `1454236` and is deployed on Kali;
+the top reconciliation is current. Device transport is WSS-only for
+non-loopback binds, ghostd pins the self-signed listener SPKI with a public-CA
+fallback, server tokens are hash-only, Android encrypts its token with Keystore
+and disables backup, and `rotate-token`/`rotate-admin` implement online
+rotation. Local verification is 272 server, 162 ghostd and 115 ghosta tests plus
+`py_compile`; release builds pass.
+
+The emulator reconnects over WSS as ghostd 0.4.2 / ghosta 0.2.1. The recorded
+29/29 E2E and unlock/consent/reboot/removal checks remain pre-WSS (ghostd 0.4.1).
+The full WSS E2E and live token/admin rotation have not been rerun. Pixel 10a
+was not touched and remains on ghostd 0.3.8. The console still uses a
+self-signed IP certificate and the hardened backend still needs redeployment.
+The shared enrollment key remains a residual risk, and the still-open list in
+the top reconciliation is authoritative.
