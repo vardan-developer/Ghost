@@ -4,7 +4,16 @@ The Android clients never hardcode the server address. The current C2
 endpoint (`host[:port]`) lives in a tiny public smart contract; clients
 resolve it via read-only `eth_call` on every connect/reconnect (and hourly
 while connected). Moving the C2 server = one owner transaction. No app
-update, no re-deploy.
+update, no re-deploy for the address itself.
+
+Transport is always WSS: the client normalises the on-chain `host[:port]` to
+`wss://host[:port]`, upgrades cached `ws://`/`http(s)://` values, and refuses a
+plaintext endpoint. Use a certificate whose SAN covers the on-chain host (or
+IP) that clients dial. A public CA certificate needs no app change; a
+self-signed certificate must match the SPKI pin in `C2.TLS_SPKI_SHA256`, so a
+new self-signed key requires an app update even though the on-chain address did
+not change. Prefer a stable DNS name and a public CA certificate for production
+moves.
 
 ## Contents
 
