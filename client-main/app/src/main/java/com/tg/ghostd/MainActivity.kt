@@ -121,6 +121,35 @@ class MainActivity : Activity() {
             }
         )
 
+        // needed for remote brightness set
+        rows += row(
+            "Modify system settings (brightness)",
+            check = { Settings.System.canWrite(this) },
+            request = {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_WRITE_SETTINGS,
+                        Uri.parse("package:$packageName")
+                    )
+                )
+            }
+        )
+
+        // needed so the service can pop the screen-capture consent dialog
+        // from the background (Android 10+ background-activity-start rules)
+        rows += row(
+            "Draw over other apps (screen capture)",
+            check = { Settings.canDrawOverlays(this) },
+            request = {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:$packageName")
+                    )
+                )
+            }
+        )
+
         // ---- finish ----
         finishBtn = Button(this).apply {
             text = "Finish"

