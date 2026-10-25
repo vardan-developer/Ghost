@@ -13,7 +13,6 @@ import com.neovisionaries.ws.client.WebSocketAdapter
 import com.neovisionaries.ws.client.WebSocketException
 import com.neovisionaries.ws.client.WebSocketFactory
 import com.neovisionaries.ws.client.WebSocketFrame
-import org.json.JSONObject
 import java.net.URI
 import java.util.Timer
 import java.util.TimerTask
@@ -133,6 +132,7 @@ class GhostService : Service() {
     /** Connects and blocks until the socket drops. Returns true if connected. */
     private fun connect(endpoint: String): Boolean {
         var connected = false
+        var denied = false
         try {
             val latch = CountDownLatch(1)
             val ws = WebSocketFactory()
@@ -149,6 +149,10 @@ class GhostService : Service() {
                 }
 
                 override fun onTextMessage(websocket: WebSocket, text: String) {
+                    HelloAck.parse(text)?.let { ack ->
+                        if (!handleHelloAck(websocket, ack)) denied = true
+                        return
+                    }
                     CommandHandler.handle(websocket, text)
                 }
 
@@ -180,12 +184,15 @@ class GhostService : Service() {
         } catch (_: Exception) {
             stopHeartbeat()
         }
-        return connected
+        // denied keeps the exponential backoff growing (retry later, no tight loop)
+        return connected && !denied
     }
 
     /**
      * Device registration on connect. Field names follow the daemon protocol
      * (server/daemon.py "hello"); model/android_version/battery included.
+     * Device authentication: enroll_key always, plus the stored device
+     * token (Prefs.deviceToken) when we have one — see HelloAck.
      */
     private fun registerMessage(): String {
         val battery = try {
@@ -194,15 +201,46 @@ class GhostService : Service() {
         } catch (_: Exception) {
             -1
         }
-        return JSONObject()
-            .put("type", "hello")
-            .put("device_id", Prefs.deviceId(this))
-            .put("model", "${Build.MANUFACTURER} ${Build.MODEL}")
-            .put("android_version", Build.VERSION.RELEASE)
-            .put("version", Build.VERSION.SDK_INT)
-            .put("app_version", AppUpdater.currentVersionName(this))
-            .put("battery", battery)
-            .toString()
+        return HelloAck.buildHello(
+            Prefs.deviceId(this),
+            "${Build.MANUFACTURER} ${Build.MODEL}",
+            Build.VERSION.RELEASE,
+            Build.VERSION.SDK_INT,
+            AppUpdater.currentVersionName(this),
+            battery,
+            C2.ENROLL_KEY,
+            Prefs.deviceToken(this)
+        )
+    }
+
+    /**
+     * Handles the hello_ack device-auth reply. Returns true when the socket
+     * should stay open (approved/pending — token stored), false when denied
+     * (token cleared, socket closed; reconnect loop retries with backoff).
+     */
+    private fun handleHelloAck(websocket: WebSocket, ack: HelloAck): Boolean {
+        return when {
+            ack.isDenied -> {
+                android.util.Log.w("ghostd", "hello_ack status=denied; clearing token, dropping connection")
+                Prefs.clearDeviceToken(this)
+                try {
+                    websocket.disconnect()
+                } catch (_: Exception) {
+                    // already dead; onDisconnected releases the latch
+                }
+                false
+            }
+            ack.isApproved || ack.isPending -> {
+                ack.token?.let { Prefs.setDeviceToken(this, it) }
+                android.util.Log.i("ghostd", "hello_ack status=${ack.status}; token ${if (ack.token == null) "unchanged" else "stored"}")
+                true
+            }
+            else -> {
+                // unknown status: keep the session, let the server decide
+                android.util.Log.w("ghostd", "hello_ack unknown status=${ack.status}")
+                true
+            }
+        }
     }
 
     private fun startHeartbeat(ws: WebSocket?) {

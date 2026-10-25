@@ -22,4 +22,11 @@ object C2 {
 
     /** keccak256("endpoint()")[0..3] = 5e280f11 */
     const val ENDPOINT_SELECTOR = "5e280f11"
+
+    /**
+     * Device enrollment shared secret sent in every "hello". MUST match the
+     * server's enroll key (server GHOST_ENROLL_KEY / enroll.key). Regenerated
+     * at deploy time — change it in this one place only.
+     */
+    const val ENROLL_KEY = "changeme-enroll-0"
 }
