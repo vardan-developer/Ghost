@@ -43,6 +43,16 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
 BASE = Path(__file__).resolve().parent
+
+# .env next to the script (shared with daemon) may carry GHOST_CONSOLE_PASS
+try:
+    for _line in (BASE / ".env").read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            os.environ.setdefault(_k.strip(), _v.strip())
+except FileNotFoundError:
+    pass
 sys.path.insert(0, str(BASE))
 import ghostctl  # noqa: E402  (reuse the CLI's daemon client code)
 
