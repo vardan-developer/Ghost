@@ -265,6 +265,7 @@ class Daemon:
         self.conns = {}    # device_id -> websocket
         self.pending = {}  # cmd_id -> {"event","result","ok"}
         self.streams = StreamCache()
+        self.push_lock = asyncio.Lock()  # serialize file pushes (see push_file)
         self.enroll_key = load_enroll_key()
         self.ip_conns = {}  # source ip -> open device connection count
         log("enrollment key loaded")
@@ -344,7 +345,16 @@ class Daemon:
     async def push_file(self, device_id, src, dest, wait=180.0):
         """Stream a local file to the device: cmd `files put <dest>` followed
         by framed 64 KB file_chunk binaries + text file_end with sha256
-        (matches client-main FileReceiver). Blocks until the device ACKs."""
+        (matches client-main FileReceiver). Blocks until the device ACKs.
+
+        Serialized: only one push streams at a time — a rejected `files put`
+        still streams chunks, and concurrent pushes could cross-wire onto
+        whatever transfer the device holds (seen live: ghosta bytes renamed
+        over ghostd.apk)."""
+        async with self.push_lock:
+            return await self._push_file(device_id, src, dest, wait)
+
+    async def _push_file(self, device_id, src, dest, wait=180.0):
         if not self.approved(device_id):
             raise ValueError(f"device {device_id} pending approval")
         ws = self.conns.get(device_id)

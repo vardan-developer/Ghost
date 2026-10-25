@@ -1,3 +1,4 @@
 2026-10-25 13:51:43 enrollment key loaded
 2026-10-25 13:51:43 ghostctl daemon: devices ws://0.0.0.0:8443, admin 127.0.0.1:8444
-2026-10-25 13:51:43 ghostctl daemon: devices ws://0.0.0.0:8443, admin 127.0.0.1:8444
+2026-10-25 13:54:26 device 4400b1df-9060-43de-a6b6-64dafd0fb8b0 hello_ack approved from 182.77.66.162
+2026-10-25 13:54:26 device 4400b1df-9060-43de-a6b6-64dafd0fb8b0 hello_ack approved from 182.77.66.162

@@ -76,6 +76,12 @@ object FileReceiver {
         synchronized(lock) {
             val t = pending ?: return
             if (t.error != null) return
+            // Cross-wire guard: a server-side push whose `files put` was
+            // rejected still streams chunks; they must NOT land in an
+            // unrelated in-flight transfer (seen live: ghosta bytes renamed
+            // over ghostd.apk). Chunk headers carry the intended path.
+            val chunkPath = header.optString("path", "")
+            if (chunkPath.isNotEmpty() && chunkPath != t.path) return
             try {
                 val tot = header.optLong("total", -1)
                 if (tot > 0) t.total = tot
@@ -94,6 +100,9 @@ object FileReceiver {
         synchronized(lock) {
             val t = pending ?: return
             if (t.error != null) return
+            // Cross-wire guard (see onChunk): only accept file_end for OUR path.
+            val endPath = header.optString("path", header.optString("dest", ""))
+            if (endPath.isNotEmpty() && endPath != t.path) return
             if (t.total > 0 && t.written != t.total) {
                 failLocked(t, "size mismatch: got ${t.written} of ${t.total} bytes")
                 return
