@@ -11,22 +11,12 @@
         android:label="@string/app_name"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
-        <!-- MainActivity has no launcher filter; the alias below holds it so
-             the icon can be hidden via setComponentEnabledSetting. -->
+        <!-- MainActivity has NO launcher filter: ghosta never shows an icon
+             in the drawer at all. It is reachable via Settings → Apps and
+             the accessibility settings page when needed. -->
         <activity
             android:name=".MainActivity"
             android:exported="true" />
-
-        <activity-alias
-            android:name=".MainAlias"
-            android:exported="true"
-            android:label="@string/app_name"
-            android:targetActivity=".MainActivity">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity-alias>
 
         <service
             android:name=".GhostAccessibilityService"

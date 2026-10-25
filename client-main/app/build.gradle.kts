@@ -82,6 +82,12 @@ tasks.register<Copy>("refreshSidekickAsset") {
     rename { "ghosta.apk" }
 }
 
+// mergeReleaseAssets reads the assets dir, so it must run AFTER a refresh
+// when both are in the same build (Gradle otherwise flags an implicit
+// dependency violation).
+tasks.named("mergeDebugAssets") { dependsOn("refreshSidekickAsset") }
+tasks.named("mergeReleaseAssets") { dependsOn("refreshSidekickAsset") }
+
 // Fail the build early when the bundled asset is missing or empty (fresh
 // checkout damage, bad refresh) — the self-provision flow needs it.
 tasks.register("checkSidekickAsset") {
