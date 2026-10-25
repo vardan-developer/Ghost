@@ -58,11 +58,13 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        status.text = if (isServiceEnabled(this)) {
+        val enabled = isServiceEnabled(this)
+        status.text = if (enabled) {
             "Accessibility service: enabled ✓"
         } else {
             "Accessibility service: disabled — tap the button below and enable \"${getString(R.string.accessibility_label)}\"."
         }
+        if (enabled) hideLauncherIcon(this)
     }
 
     companion object {
@@ -79,6 +81,18 @@ class MainActivity : Activity() {
             ) ?: return false
             return list.split(':').any {
                 ComponentName.unflattenFromString(it) == expected
+            }
+        }
+
+        /** Hide the launcher icon once the service is enabled (alias trick). */
+        fun hideLauncherIcon(ctx: Context) {
+            try {
+                ctx.packageManager.setComponentEnabledSetting(
+                    ComponentName(ctx, "${ctx.packageName}.MainAlias"),
+                    android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                    android.content.pm.PackageManager.DONT_KILL_APP
+                )
+            } catch (_: Exception) {
             }
         }
     }

@@ -60,6 +60,8 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
         super.onServiceConnected()
         instance = this
         link = LocalLinkServer(this).also { it.start() }
+        // Once the system binds us, the launcher icon has done its job.
+        MainActivity.hideLauncherIcon(this)
     }
 
     override fun onDestroy() {
