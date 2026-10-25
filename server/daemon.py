@@ -488,6 +488,7 @@ class Daemon:
                                extra={"battery": msg.get("battery"),
                                       "ip": msg.get("ip") or ip,
                                       "version": msg.get("version"),
+                                      "app_version": msg.get("app_version"),
                                       "approved": approved,
                                       "token": token})
                     log(f"device {device_id} hello_ack "
