@@ -38,6 +38,7 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
             "start recording",
             "install",
             "install anyway",
+            "update",
             "continue",
             "while using the app"
         )

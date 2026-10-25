@@ -441,7 +441,10 @@ class Daemon:
 
     async def run(self, bind, port, admin_host, admin_port):
         admin = await asyncio.start_server(self.admin_handler, admin_host, admin_port)
-        async with websockets.serve(self.device_handler, bind, port):
+        # max_size 32 MiB: screen-shot PNGs arrive base64-inflated in one
+        # command response; the default 1 MiB rejected them.
+        async with websockets.serve(self.device_handler, bind, port,
+                                    max_size=32 * 1024 * 1024):
             print(f"ghostctl daemon: devices ws://{bind}:{port}, "
                   f"admin {admin_host}:{admin_port}", flush=True)
             async with admin:

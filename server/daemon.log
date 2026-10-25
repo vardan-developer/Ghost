@@ -1,15 +1,1 @@
 ghostctl daemon: devices ws://0.0.0.0:8443, admin 127.0.0.1:8444
-connection handler failed
-Traceback (most recent call last):
-  File "/usr/lib/python3/dist-packages/websockets/asyncio/server.py", line 747, in protocol_handler
-    await handler(connection)
-  File "/home/admin/code/hack/projects/ghostctl/server/daemon.py", line 344, in device_handler
-    async for raw in ws:
-    ...<38 lines>...
-                rec["event"].set()
-  File "/usr/lib/python3/dist-packages/websockets/asyncio/connection.py", line 237, in __aiter__
-    yield await self.recv()
-          ^^^^^^^^^^^^^^^^^
-  File "/usr/lib/python3/dist-packages/websockets/asyncio/connection.py", line 317, in recv
-    raise self.protocol.close_exc from self.recv_exc
-websockets.exceptions.ConnectionClosedError: no close frame received or sent
