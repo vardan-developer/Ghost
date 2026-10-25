@@ -203,6 +203,14 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
     /** Click a node by id path; walks up to the nearest clickable ancestor. */
     private fun performClick(id: String): Boolean {
         var node = liveNode(id) ?: return false
+        // Nodes resolved from a previous dump can be stale: performAction on a
+        // detached node reports success but lands nowhere. Refresh in place,
+        // and re-resolve by path if the refresh fails.
+        var refreshed = false
+        try { refreshed = node.refresh() } catch (_: Exception) {}
+        if (!refreshed) {
+            node = liveNode(id) ?: return false
+        }
         var tries = 0
         while (tries++ < 8) {
             if (node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
