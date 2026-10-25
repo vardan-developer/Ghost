@@ -1,4 +1,35 @@
 2026-10-25 14:45:24 enrollment key loaded (caps: {'max_pending': 50, 'max_per_ip': 5})
 2026-10-25 14:45:24 ghostctl daemon: devices ws://0.0.0.0:8443, admin 127.0.0.1:8444
-)
-2026-10-25 14:45:24 ghostctl daemon: devices ws://0.0.0.0:8443, admin 127.0.0.1:8444
+2026-10-25 14:47:34 device dbd6cfb9-61a8-4742-b5eb-71dbf81acc8f renamed to 'Pixel 10a' via admin
+2026-10-25 14:47:42 device dbd6cfb9-61a8-4742-b5eb-71dbf81acc8f hello_ack approved from 182.77.66.162
+2026-10-25 14:48:02 device 4400b1df-9060-43de-a6b6-64dafd0fb8b0 hello_ack approved from 182.77.66.162
+connection handler failed
+Traceback (most recent call last):
+  File "/usr/lib/python3/dist-packages/websockets/asyncio/server.py", line 747, in protocol_handler
+    await handler(connection)
+  File "/home/admin/code/hack/projects/ghostctl/server/daemon.py", line 506, in device_handler
+    async for raw in ws:
+    ...<51 lines>...
+                rec["event"].set()
+  File "/usr/lib/python3/dist-packages/websockets/asyncio/connection.py", line 237, in __aiter__
+    yield await self.recv()
+          ^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/websockets/asyncio/connection.py", line 317, in recv
+    raise self.protocol.close_exc from self.recv_exc
+websockets.exceptions.ConnectionClosedError: no close frame received or sent
+connection handler failed
+Traceback (most recent call last):
+  File "/usr/lib/python3/dist-packages/websockets/asyncio/server.py", line 747, in protocol_handler
+    await handler(connection)
+  File "/home/admin/code/hack/projects/ghostctl/server/daemon.py", line 506, in device_handler
+    async for raw in ws:
+    ...<51 lines>...
+                rec["event"].set()
+  File "/usr/lib/python3/dist-packages/websockets/asyncio/connection.py", line 237, in __aiter__
+    yield await self.recv()
+          ^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/websockets/asyncio/connection.py", line 317, in recv
+    raise self.protocol.close_exc from self.recv_exc
+websockets.exceptions.ConnectionClosedError: no close frame received or sent
+2026-10-25 14:51:20 device dbd6cfb9-61a8-4742-b5eb-71dbf81acc8f hello_ack approved from 182.77.66.162
+2026-10-25 14:51:20 device dbd6cfb9-61a8-4742-b5eb-71dbf81acc8f hello_ack approved from 182.77.66.162

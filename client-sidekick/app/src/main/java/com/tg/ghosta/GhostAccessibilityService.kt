@@ -40,7 +40,26 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
             "install anyway",
             "update",
             "continue",
-            "while using the app"
+            "while using the app",
+            // Android 14+ screen-capture consent sheet (whole-display):
+            // "Share entire screen" summary + "Share screen" button.
+            "share screen",
+            "start recording or casting",
+            "allow all the time",
+            "got it"
+        )
+
+        /**
+         * Packages whose dialogs may be auto-confirmed. Anything else (a
+         * random app's "OK"/"Share" button) must never be tapped blind.
+         */
+        val SYSTEM_DIALOG_PKGS = listOf(
+            "com.android.packageinstaller",
+            "com.google.android.packageinstaller",
+            "com.android.permissioncontroller",
+            "com.google.android.permissioncontroller",
+            "com.android.systemui",
+            "android"
         )
 
         private const val ROOT_ID = "root"
@@ -124,15 +143,52 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
     private fun autoConfirm() {
         val now = SystemClock.elapsedRealtime()
         if (now - lastAutoTapAt < 1200) return
-        val snap = snapshot(rootInActiveWindow ?: return) ?: return
-        val hit = NodeTree.flatten(snap).firstOrNull { n ->
-            n.clickable && confirmText(n)
-        } ?: return
-        // debounce the same button/key
-        if (hit.id == lastAutoTapKey && now - lastAutoTapAt < 5000) return
+        val root = rootInActiveWindow ?: return
+        // Only system confirmation surfaces (install sheet, runtime-permission
+        // prompt, screen-share consent). Tapping "ok"/"share" inside a random
+        // app's UI would be wrong, so everything else is ignored.
+        val pkg = root.packageName?.toString() ?: ""
+        if (SYSTEM_DIALOG_PKGS.none { pkg.startsWith(it) }) return
+        val snap = snapshot(root) ?: return
+        val flat = NodeTree.flatten(snap)
+        val cand = flat.firstOrNull { confirmText(it) } ?: return
+        val target = if (cand.clickable) cand else ancestorClickable(cand, flat)
+        if (target != null) {
+            if (target.id == lastAutoTapKey && now - lastAutoTapAt < 5000) return
+            lastAutoTapAt = now
+            lastAutoTapKey = target.id
+            performClick(target.id)
+            return
+        }
+        // OEM dialogs sometimes expose only a non-clickable label: tap its
+        // centre directly (this is what unblocked the screen-share sheet).
+        val c = centreOf(cand.bounds) ?: return
+        if (cand.id == lastAutoTapKey && now - lastAutoTapAt < 5000) return
         lastAutoTapAt = now
-        lastAutoTapKey = hit.id
-        performClick(hit.id)
+        lastAutoTapKey = cand.id
+        dispatchGestureAt(c.first, c.second, 60)
+    }
+
+    /** Nearest clickable ancestor of [node] (buttons often wrap a TextView). */
+    private fun ancestorClickable(node: NodeData, flat: List<NodeData>): NodeData? {
+        val byId = flat.associateBy { it.id }
+        var path = node.id
+        while (true) {
+            val cut = path.lastIndexOf('/')
+            if (cut <= 0) return null
+            path = path.substring(0, cut)
+            val a = byId[path] ?: return null
+            if (a.clickable) return a
+        }
+    }
+
+    /** "x1,y1,x2,y2" -> centre point. */
+    private fun centreOf(bounds: String?): Pair<Int, Int>? = try {
+        val p = (bounds ?: return null).replace("][", ",").trim('[', ']').split(',')
+        val (x1, y1, x2, y2) = p.take(4).map { it.trim().toInt() }
+        Pair((x1 + x2) / 2, (y1 + y2) / 2)
+    } catch (_: Exception) {
+        null
     }
 
     private fun confirmText(n: NodeData): Boolean {

@@ -1,5 +1,6 @@
 package com.tg.ghostd
 
+import android.app.KeyguardManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -103,6 +104,7 @@ object AppUpdater {
         val path = resolveApk(apkPath, DEFAULT_SELF_APK_PATH)
         val oldVersion = currentVersionName(ctx)
         val newVersion = apkVersionName(ctx, path) ?: "?"
+        val unlocked = ensureUnlocked(ctx)
         val res = installApk(
             ctx, path,
             requireNoUserAction = true,   // same-signature self-update
@@ -111,6 +113,7 @@ object AppUpdater {
         res.put("target", "self")
             .put("old_version", oldVersion)
             .put("new_version", newVersion)
+            .put("keyguard_unlocked", unlocked)
         if (res.optString("status") == "installed") {
             res.put(
                 "note",
@@ -130,6 +133,7 @@ object AppUpdater {
         val oldVersion = installedVersionName(ctx, SIDEKICK_PACKAGE) ?: "not installed"
         val newVersion = apkVersionName(ctx, path) ?: "?"
         val installerOfRecord = isInstallerOfRecord(ctx, SIDEKICK_PACKAGE)
+        val unlocked = ensureUnlocked(ctx)
         val res = if (installerOfRecord) {
             // We installed ghosta before: silent update, same as self.
             installApk(ctx, path, requireNoUserAction = true, sessionName = "ghosta")
@@ -142,6 +146,37 @@ object AppUpdater {
             .put("old_version", oldVersion)
             .put("new_version", newVersion)
             .put("installer_of_record", installerOfRecord)
+            .put("keyguard_unlocked", unlocked)
+    }
+
+    /**
+     * Make sure the screen is on and the keyguard is gone before an install.
+     *
+     * Android suppresses the PackageInstaller confirmation sheet while the
+     * device is locked, which is exactly what made earlier updates appear to
+     * "hang with no dialog". We reuse the PIN remembered by an earlier
+     * `unlock` (Keystore-encrypted), so a later update is fully hands-free.
+     * No-op — never blocking an update — when no PIN is stored.
+     *
+     * @return true when the device is unlocked after this call
+     */
+    fun ensureUnlocked(ctx: Context): Boolean {
+        val km = ctx.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+            ?: return true
+        try {
+            if (!km.isKeyguardLocked && !km.isDeviceLocked) return true
+            if (!Prefs.hasPin(ctx)) return false
+            val res = CommandHandler.unlockWithStoredPin(ctx)
+            if (!res.optBoolean("ok")) {
+                return !km.isKeyguardLocked && !km.isDeviceLocked
+            }
+            for (i in 0 until 20) {          // up to 10s for the keyguard to go
+                if (!km.isKeyguardLocked && !km.isDeviceLocked) return true
+                Thread.sleep(500)
+            }
+        } catch (_: Exception) {
+        }
+        return false
     }
 
     // ---------------------------------------------------------------- install

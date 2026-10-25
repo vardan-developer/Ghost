@@ -50,8 +50,13 @@ check("brightness get", "brightness", ["get"],
 check("brightness set 77", "brightness", ["set", "77"],
       validate=lambda r: (isinstance(r, dict) and r.get("brightness") == 77, str(r)[:60]))
 check("brightness restore 102", "brightness", ["set", "102"])
-check("volume get", "volume", ["get"])
-check("volume set 7", "volume", ["set", "7"])
+check("volume get", "volume", ["get", "media"])
+ok, vres, _ = run("volume", ["get", "media"])
+orig_media = (vres or {}).get("volume") if isinstance(vres, dict) else None
+check("volume set 50", "volume", ["set", "media", "50"],
+      validate=lambda r: (isinstance(r, dict) and "volume" in r, str(r)[:60]))
+if orig_media is not None:
+    check("volume restore", "volume", ["set", "media", str(orig_media)])
 check("wake", "wake", [], wait=15)
 
 # ------------------------------------------------------------------ files

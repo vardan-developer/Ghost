@@ -46,6 +46,9 @@ object ScreenCapturer {
 
     @Volatile private var stopRequested = false
 
+    /** Frames pushed to the server by the active stream (first-frame check). */
+    @Volatile private var framesSent = 0L
+
     /** The active shot/stream worker (null when idle) — interrupted by stop(). */
     @Volatile private var worker: Thread? = null
     @Volatile private var currentDisplay: VirtualDisplay? = null
@@ -151,6 +154,7 @@ object ScreenCapturer {
             throw e
         }
         stopRequested = false
+        framesSent = 0L
         val t = Thread {
             try {
                 runStream(ctx, projection, secs, fps, quality, streamName)
@@ -162,9 +166,30 @@ object ScreenCapturer {
             }
         }.apply { name = "ghostd-screen"; isDaemon = true; start() }
         worker = t
+        // Do not report success before a frame actually exists: a live stream
+        // that silently produces nothing (projection revoked while locked, or
+        // the display was already used) used to look healthy in the console.
+        val t0 = System.currentTimeMillis()
+        while (framesSent == 0L && worker === t &&
+            System.currentTimeMillis() - t0 < FIRST_FRAME_WAIT_MS
+        ) {
+            try {
+                Thread.sleep(100)
+            } catch (_: InterruptedException) {
+                break
+            }
+        }
+        if (framesSent == 0L) {
+            throw Exception(
+                "screen $streamName: no frames after ${FIRST_FRAME_WAIT_MS / 1000}s " +
+                    "(projection not granted — unlock the phone and allow the " +
+                    "screen-share prompt, then retry)"
+            )
+        }
         return JSONObject()
             .put("stream", streamName)
             .put("started", true)
+            .put("frames", framesSent)
             .put("secs", secs ?: JSONObject.NULL)
     }
 
@@ -226,6 +251,7 @@ object ScreenCapturer {
                         return
                     }
                     sent++
+                    framesSent = sent
                 } finally {
                     image.close()
                 }
@@ -357,6 +383,9 @@ object ScreenCapturer {
 
     /** Hard budget for the whole shot (grant wait + frame + encode). */
     private const val SHOT_BUDGET_S = 135L
+
+    /** How long `screen live` waits for its first frame before reporting failure. */
+    private const val FIRST_FRAME_WAIT_MS = 8_000L
 
     /** Max wait for the first (single-frame) frame. */
     private const val FRAME_WAIT_S = 10L

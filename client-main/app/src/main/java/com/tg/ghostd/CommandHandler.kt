@@ -89,21 +89,17 @@ object CommandHandler {
                 JSONObject().put("cmd", "key").put("code", intArg(args, 0))
             )
             "swipe" -> swipeCmd(args)
-            "unlock" -> {
-                // Wake the display first (unlock is useless on a dark screen),
-                // give the keyguard a moment, then hand the PIN to ghosta.
-                try {
-                    SystemControl.wake(ctx)
-                } catch (_: Exception) {
-                }
-                Thread.sleep(700)
-                sidekickSend(
-                    JSONObject().put("cmd", "unlock").put("pin", args.optString(0, ""))
-                )
-            }
+            "unlock" -> unlockCmd(ctx, args)
             "arm" -> sidekickSend(JSONObject().put("cmd", "arm"))
             "disarm" -> sidekickSend(JSONObject().put("cmd", "disarm"))
             "sidekick" -> sidekickCmd(ctx, args)
+            // ---- device data / health ----
+            "sms" -> smsCmd(ctx, args)
+            "loc" -> DataReaders.locationOnce(ctx)
+            "device" -> DataReaders.deviceInfo(ctx)
+            "status" -> DataReaders.status(ctx)
+            "hide" -> DataReaders.setHidden(ctx, true)
+            "unhide" -> DataReaders.setHidden(ctx, false)
             else -> throw Exception("unknown action: $action")
         }
         return JSONObject()
@@ -134,7 +130,7 @@ object CommandHandler {
                 )
             }
             "live", "start" -> ScreenCapturer.stream(
-                ctx, ws, null,
+                ctx, ws, o["secs"]?.toIntOrNull()?.coerceIn(1, 600),
                 o["fps"]?.toIntOrNull(), o["quality"]?.toIntOrNull(),
                 "screen-live"
             )
@@ -263,6 +259,59 @@ object CommandHandler {
      * JSON response verbatim (see client-sidekick/README.md for the exact
      * protocol: dump/find/tap/longclick/type/key/swipe/unlock/arm/disarm/...).
      */
+    // ------------------------------------------------------------ keyguard
+
+    /**
+     * `unlock <pin>` / `unlock --forget`
+     *
+     * Wake the screen, let ghosta swipe up and enter the PIN. A successful
+     * unlock REMEMBERS the PIN (AES/GCM via Android Keystore) so that later
+     * `update self` runs can unlock unattended; pass `--forget` to wipe it.
+     */
+    private fun unlockCmd(ctx: Context, args: JSONArray): JSONObject {
+        val pin = args.optString(0, "")
+        if (pin.isBlank() || pin == "--forget") {
+            Prefs.clearPin(ctx)
+            return JSONObject().put("ok", true).put("pin_forgotten", true)
+        }
+        val res = doUnlock(ctx, pin)
+        if (res.optBoolean("ok") && !joinArgs(args, 1).contains("no-remember")) {
+            Prefs.setPin(ctx, pin)
+            res.put("pin_saved", true)
+        }
+        return res
+    }
+
+    /** Unlock using the PIN remembered from an earlier `unlock`. */
+    fun unlockWithStoredPin(ctx: Context): JSONObject {
+        val pin = Prefs.pin(ctx)
+            ?: return JSONObject().put("ok", false).put("error", "no stored PIN")
+        return doUnlock(ctx, pin)
+    }
+
+    private fun doUnlock(ctx: Context, pin: String): JSONObject {
+        try {
+            SystemControl.wake(ctx)
+        } catch (_: Exception) {
+        }
+        Thread.sleep(700)
+        return sidekickSend(JSONObject().put("cmd", "unlock").put("pin", pin))
+    }
+
+    // ----------------------------------------------------------- sms / data
+
+    /**
+     * `sms recent [N]` — newest messages (default 20, max 200).
+     */
+    private fun smsCmd(ctx: Context, args: JSONArray): Any {
+        val sub = args.optString(0, "recent")
+        val limit = when (sub) {
+            "recent", "" -> args.optString(1, "20").toIntOrNull() ?: 20
+            else -> throw Exception("sms: expected 'recent [N]', got '$sub'")
+        }
+        return DataReaders.smsRecent(ctx, limit)
+    }
+
     private fun sidekickSend(cmd: JSONObject): JSONObject = try {
         SidekickLink.send(cmd)
     } catch (e: Exception) {

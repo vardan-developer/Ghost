@@ -27,6 +27,15 @@ object FileReceiver {
     /** Generous receive window — APKs and media can be hundreds of MB. */
     private const val RECEIVE_TIMEOUT_MS = 10 * 60_000L
 
+    /** A push dies silently when the server gives up mid-transfer (operator
+     *  timeout, socket drop, daemon restart). Without this the receiver slot
+     *  stays "in progress" forever and every later `files put` is refused,
+     *  which is exactly what wedged pushes after an interrupted update. */
+    private const val IDLE_TIMEOUT_MS = 90_000L
+
+    /** A transfer idle this long is dead: a new push may reclaim the slot. */
+    private const val STALE_MS = 45_000L
+
     private val lock = Any()
     private var pending: Transfer? = null
 
@@ -39,6 +48,7 @@ object FileReceiver {
         internal var total = -1L
         internal var error: String? = null
         internal var sha256: String? = null
+        internal var lastActivity = System.currentTimeMillis()
         internal val digest = MessageDigest.getInstance("SHA-256")
     }
 
@@ -47,21 +57,48 @@ object FileReceiver {
         if (path.isBlank()) throw Exception("files put: missing destination path")
         val t: Transfer
         synchronized(lock) {
-            pending?.let { throw Exception("file transfer already in progress: ${it.path}") }
+            pending?.let { stale ->
+                val idle = System.currentTimeMillis() - stale.lastActivity
+                if (idle < STALE_MS) {
+                    throw Exception("file transfer already in progress: ${stale.path}")
+                }
+                // Previous push died mid-stream (the server gave up): reclaim
+                // the slot instead of refusing every later transfer forever.
+                failLocked(stale, "superseded after ${idle / 1000}s with no data")
+            }
             t = Transfer(path)
             val parent = File(path).parentFile
             if (parent != null && !parent.exists()) parent.mkdirs()
             t.out = FileOutputStream(t.temp)
             pending = t
         }
-        val ok = try {
-            t.latch.await(RECEIVE_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
-            false
-        }
-        if (!ok) {
-            fail(t, "timed out after ${RECEIVE_TIMEOUT_MS / 1000}s (got ${t.written} of ${if (t.total < 0) "?" else t.total} bytes)")
+        val started = System.currentTimeMillis()
+        while (true) {
+            val ok = try {
+                t.latch.await(2, java.util.concurrent.TimeUnit.SECONDS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                fail(t, "interrupted")
+                false
+            }
+            if (ok) break
+            val now = System.currentTimeMillis()
+            if (now - t.lastActivity > IDLE_TIMEOUT_MS) {
+                fail(
+                    t,
+                    "stalled: no data for ${IDLE_TIMEOUT_MS / 1000}s " +
+                        "(got ${t.written} of ${if (t.total < 0) "?" else t.total} bytes)"
+                )
+                break
+            }
+            if (now - started > RECEIVE_TIMEOUT_MS) {
+                fail(
+                    t,
+                    "timed out after ${RECEIVE_TIMEOUT_MS / 1000}s " +
+                        "(got ${t.written} of ${if (t.total < 0) "?" else t.total} bytes)"
+                )
+                break
+            }
         }
         t.error?.let { throw Exception("files put: $it") }
         return JSONObject()
@@ -82,6 +119,7 @@ object FileReceiver {
             // over ghostd.apk). Chunk headers carry the intended path.
             val chunkPath = header.optString("path", "")
             if (chunkPath.isNotEmpty() && chunkPath != t.path) return
+            t.lastActivity = System.currentTimeMillis()
             try {
                 val tot = header.optLong("total", -1)
                 if (tot > 0) t.total = tot
