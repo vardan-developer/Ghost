@@ -29,6 +29,12 @@ class GhostService : Service() {
 
     private var worker: Thread? = null
     private var heartbeat: Timer? = null
+
+    /** Wall-clock (elapsedRealtime) of the last inbound WS traffic. The
+     *  heartbeat watchdog force-disconnects when this goes stale — without
+     *  it, a half-open TCP connection (server died without RST reaching us)
+     *  looks alive forever and the reconnect loop never wakes up. */
+    @Volatile private var lastInbound = 0L
     @Volatile private var running = false
 
     override fun onCreate() {
@@ -144,11 +150,13 @@ class GhostService : Service() {
                 ) {
                     android.util.Log.i("ghostd", "WS connected to ${websocket.uri}")
                     connected = true
+                    lastInbound = android.os.SystemClock.elapsedRealtime()
                     websocket.sendText(registerMessage())
                     startHeartbeat(websocket)
                 }
 
                 override fun onTextMessage(websocket: WebSocket, text: String) {
+                    lastInbound = android.os.SystemClock.elapsedRealtime()
                     HelloAck.parse(text)?.let { ack ->
                         if (!handleHelloAck(websocket, ack)) denied = true
                         return
@@ -157,6 +165,7 @@ class GhostService : Service() {
                 }
 
                 override fun onBinaryMessage(websocket: WebSocket, binary: ByteArray) {
+                    lastInbound = android.os.SystemClock.elapsedRealtime()
                     // incoming file streams (files put) — MediaBus framing
                     CommandHandler.onBinary(binary)
                 }
@@ -251,8 +260,22 @@ class GhostService : Service() {
                 override fun run() {
                     try {
                         ws.sendText("""{"type":"ping"}""")
-                    } catch (_: Exception) {
-                        // socket dead; reconnect loop handles it
+                    } catch (e: Exception) {
+                        // socket dead: force-close so onDisconnected fires and
+                        // the reconnect loop wakes up (previously this was
+                        // swallowed and nobody noticed a dead connection)
+                        android.util.Log.w("ghostd", "heartbeat send failed: ${e.message}")
+                        try { ws.disconnect() } catch (_: Exception) {}
+                        return
+                    }
+                    val idle = android.os.SystemClock.elapsedRealtime() - lastInbound
+                    if (idle > HEARTBEAT_MS * 3) {
+                        // half-open connection: server gone, TCP never told us.
+                        // The daemon answers every ping with {"type":"pong"}, so
+                        // a healthy connection never idles this long.
+                        android.util.Log.w(
+                            "ghostd", "no inbound for ${idle / 1000}s — forcing reconnect")
+                        try { ws.disconnect() } catch (_: Exception) {}
                     }
                 }
             }, HEARTBEAT_MS, HEARTBEAT_MS)
