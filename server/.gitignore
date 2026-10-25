@@ -2,3 +2,4 @@
 state.json
 history.json
 *.tmp
+__pycache__/
