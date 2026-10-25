@@ -173,6 +173,14 @@ object UnlockPolicy {
     }
 }
 
+/** Navigation keys that Android exposes as accessibility global actions. */
+internal fun globalActionForKey(code: Int): Int? = when (code) {
+    KeyEvent.KEYCODE_HOME -> AccessibilityService.GLOBAL_ACTION_HOME
+    KeyEvent.KEYCODE_BACK -> AccessibilityService.GLOBAL_ACTION_BACK
+    KeyEvent.KEYCODE_APP_SWITCH -> AccessibilityService.GLOBAL_ACTION_RECENTS
+    else -> null
+}
+
 /**
  * The sidekick accessibility service. Generic UI-driving verbs for the
  * operator, plus bounded auto-confirm of recognized system consent surfaces:
@@ -601,10 +609,12 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
     }
 
     override fun key(code: Int): Map<String, Any?> {
-        val ok = sendKey(code, 0)
+        val global = globalActionForKey(code)
+        val ok = if (global != null) performGlobalAction(global) else sendKey(code, 0)
         return if (ok) CommandRouter.ok(mapOf("what" to "key", "code" to code))
         else CommandRouter.err("key event failed for code $code")
     }
+
 
     override fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, duration: Long): Map<String, Any?> {
         val path = Path()

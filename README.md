@@ -181,10 +181,10 @@ moves; do not rely on old chat history for repository state.
 
 - `client-main`: `gradle test` (151 JVM unit tests — protocol, transfer,
   lifecycle, consent, update and wake-session behavior).
-- `client-sidekick`: `gradle test` (114 unit tests — command router, tree,
+- `client-sidekick`: `gradle test` (115 unit tests — command router, tree,
   consent, link, unlock and removal state machines).
 - `server`: `python3 -m py_compile daemon.py ghostctl.py console.py e2e_test.py`
-  and 246 unit tests pass.
+  and 247 unit tests pass.
 - Release builds for both apps pass. Emulator basic command and accessibility
   screenshot path works. Full on-device e2e with the new builds is pending.
 

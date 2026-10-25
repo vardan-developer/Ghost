@@ -836,6 +836,18 @@ phone were not touched.</p>
 {extra}
 </div>"""
         back = "/"
+    elif ok and resp.get("finalizing"):
+        title = f"Removal requested — {name}"
+        outcome = f"""
+<div class="card">
+<h2>Awaiting disconnect verification</h2>
+<p><strong>{e(name)}</strong> disconnected as expected during self-uninstall.
+The server is waiting for the bounded grace period before deleting its record.
+If the device reconnects, removal is not verified and its record is kept.</p>
+<p class="small muted">This is a pending state, not a failure and not yet proof
+that both apps were removed.</p>
+</div>"""
+        back = f"/device/{qdid}"
     else:
         title = f"Remove failed — {name}"
         error = resp.get("error") or "unknown error"

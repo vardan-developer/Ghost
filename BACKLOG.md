@@ -10,7 +10,7 @@ Last updated: 2026-10-26.
 
 - Physical test phone: **Pixel 10a**, approved and controllable. It must remain untouched during current local/emulator work.
 - Phone currently reports **ghostd 0.3.8**. Working tree is **ghostd 0.4.0 / ghosta 0.2.0**.
-- **Local full verification now passes:** 246 server unit tests + `py_compile`, 151 ghostd unit tests, 114 ghosta unit tests, and release builds.
+- **Local full verification now passes:** 247 server unit tests + `py_compile`, 151 ghostd unit tests, 115 ghosta unit tests, and release builds.
 - **Emulator:** Initial 0.3.9/0.1.9 build installed; basic command and accessibility screenshot path passed. Current 0.4.0/0.2.0 builds are not yet installed or device-e2e tested.
 - **Kali server:** Not yet updated or restarted.
 - The original e2e run passed 17/22 checks. Failures were:

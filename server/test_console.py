@@ -657,6 +657,15 @@ class TestConsole(unittest.TestCase):
         self.assertIn("disconnected before", html)
         self.assertIn("was removed", html)
 
+    def test_remove_finalizing_is_pending_not_failure(self):
+        dev = {"device_id": "abc", "name": "Test Phone"}
+        html = ui.render_remove_result(
+            dev, {"ok": True, "removed": False, "finalizing": True,
+                  "device_id": "abc"}, csrf_token=TEST_CSRF)
+        self.assertIn("Removal requested", html)
+        self.assertIn("Awaiting disconnect verification", html)
+        self.assertNotIn("Remove failed", html)
+
     # --------------------------------------------------- broadcast --------
     def test_broadcast_destroy_blocked(self):
         with patch("console._rpc_broadcast", return_value={"ok": True}):
