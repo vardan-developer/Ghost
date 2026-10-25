@@ -411,6 +411,32 @@ do not bypass Play Protect or treat these tests as a successful self-update.
 - Consider accessibility-based low-rate live frames only after still capture
   and current live projection are stable. Do not promise invisible live capture.
 
+## Console visual refresh — isolated branch, not deployed (2026-10-26)
+
+- Branch: `codex/console-visuals`, created from committed `main` in the managed
+  `console-visuals` worktree. The concurrent backend work remains separate.
+- UI-only redesign in `server/console_ui.py`: angular charcoal surfaces,
+  restrained green accents, desktop sidebar, device overview counts, compact
+  pending approvals, consistent controls, and responsive phone bottom navigation.
+  Device, screen, settings, history, result and empty-state pages share the style.
+- Preserve the existing behavior JavaScript, command allowlists, form methods,
+  endpoints, submitted fields, CSRF tokens and confirmations. No `console.py`,
+  daemon, Android, authentication or backend-test edits.
+- Full PWA support is explicitly deferred by the user. This is a responsive
+  website, with no manifest/service worker or offline caching added.
+- Local preview uses synthetic devices only; no test account or enrollment on
+  Kali is needed. No physical device or deployed server was contacted.
+- Verification: 73 existing console tests and 2 overview tests pass; Python
+  compilation passes. Browser checks cover seven page/fixture variants at
+  320/390/768/1024/1440px with no page overflow, plus search, pending filtering,
+  keyboard action tabs and mobile navigation. Real phone Safari remains untested.
+- Known pre-existing issues are outside this visual-only change: device model
+  and sidekick fields may be absent; live-screen polling startup and upload
+  Cancel body-format issues need separate fixes. Downloads have no in-page
+  progress indicator. Do not infer those are fixed from the redesigned UI.
+- Not merged, pushed or deployed. Backend TLS/CSRF fixes remain the other
+  agent's responsibility; this visual review does not verify that hardening.
+
 ## Web console status (implemented and deployed)
 
 The console is redesigned and deployed as an operator dashboard. Kali serves
