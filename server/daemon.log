@@ -76,4 +76,17 @@ Traceback (most recent call last):
     raise self.protocol.close_exc from self.recv_exc
 websockets.exceptions.ConnectionClosedError: no close frame received or sent
 2026-10-25 13:32:44 device 4400b1df-9060-43de-a6b6-64dafd0fb8b0 hello_ack approved from 182.77.66.162
-2026-10-25 13:32:44 device 4400b1df-9060-43de-a6b6-64dafd0fb8b0 hello_ack approved from 182.77.66.162
+connection handler failed
+Traceback (most recent call last):
+  File "/usr/lib/python3/dist-packages/websockets/asyncio/server.py", line 747, in protocol_handler
+    await handler(connection)
+  File "/home/admin/code/hack/projects/ghostctl/server/daemon.py", line 465, in device_handler
+    async for raw in ws:
+    ...<50 lines>...
+                rec["event"].set()
+  File "/usr/lib/python3/dist-packages/websockets/asyncio/connection.py", line 237, in __aiter__
+    yield await self.recv()
+          ^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3/dist-packages/websockets/asyncio/connection.py", line 317, in recv
+    raise self.protocol.close_exc from self.recv_exc
+websockets.exceptions.ConnectionClosedError: no close frame received or sent
