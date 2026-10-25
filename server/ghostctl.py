@@ -126,6 +126,32 @@ def apks_cmd(rest):
     sys.exit("apks: expected 'list' or 'add ghostd|ghosta <path>'")
 
 
+def resolve_device(value):
+    """Resolve a -d value: exact device id, exact/prefix id match, or the
+    device's human name (case-insensitive) — set via `ghostctl.py rename`."""
+    try:
+        devices = rpc({"op": "list"}).get("devices") or {}
+    except Exception:
+        return value
+    if value in devices:
+        return value
+    low = value.lower()
+    # exact id prefix (short uuid)
+    pref = [d for d in devices if d.startswith(value)]
+    if len(pref) == 1:
+        return pref[0]
+    # name match (case-insensitive, exact then prefix)
+    by_name = [d for d, r in devices.items()
+               if isinstance(r, dict) and str(r.get("name", "")).lower() == low]
+    if len(by_name) == 1:
+        return by_name[0]
+    by_name_p = [d for d, r in devices.items()
+                 if isinstance(r, dict) and str(r.get("name", "")).lower().startswith(low)]
+    if len(by_name_p) == 1:
+        return by_name_p[0]
+    return value
+
+
 def main():
     p = argparse.ArgumentParser(prog="ghostctl", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -165,6 +191,14 @@ def main():
         if not did:
             sys.exit(f"specify device id: ghostctl.py {ns.verb} <device_id>")
         emit(rpc({"op": ns.verb, "device_id": did}), ns.pretty)
+        return
+    if ns.verb == "rename":
+        # rename <device-id-or-name> <new name...>  (name may contain spaces)
+        if len(ns.rest) < 2:
+            sys.exit("usage: ghostctl.py rename <device_id> <new name>")
+        did = resolve_device(ns.rest[0])
+        name = " ".join(ns.rest[1:])
+        emit(rpc({"op": "rename", "device_id": did, "name": name}), ns.pretty)
         return
     if ns.verb in ("list", "status", "devices") and not ns.device and not ns.all:
         emit(rpc({"op": "list"}), ns.pretty)

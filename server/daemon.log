@@ -5,5 +5,6 @@
 2026-10-25 14:24:41 device 4400b1df-9060-43de-a6b6-64dafd0fb8b0 hello_ack approved from 182.77.66.162
 2026-10-25 14:34:52 device dbd6cfb9-61a8-4742-b5eb-71dbf81acc8f hello_ack pending from 182.77.66.162
 2026-10-25 14:35:36 device dbd6cfb9-61a8-4742-b5eb-71dbf81acc8f approved via admin
-from 182.77.66.162
-2026-10-25 14:35:36 device dbd6cfb9-61a8-4742-b5eb-71dbf81acc8f approved via admin
+2026-10-25 14:44:59 device b0073d52-aed9-4bfb-b8e6-b7dede8c10d3 revoked via admin (token rotated)
+min
+2026-10-25 14:44:59 device b0073d52-aed9-4bfb-b8e6-b7dede8c10d3 revoked via admin (token rotated)

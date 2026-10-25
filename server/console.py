@@ -201,14 +201,16 @@ def page_devices():
         bat = f"{bat}%" if bat is not None else "-"
         appr = ("<b style='color:#2a2'>approved</b>" if d.get("approved")
                 else "<i style='color:#c60'>pending</i>")
+        name = d.get("name") or did
         rows.append(
             f"<tr><td><span class='dot {dot}'></span> {'on' if d.get('online') else 'off'}</td>"
-            f"<td><a href='/device/{quote(did)}'>{e(did)}</a></td>"
+            f"<td><a href='/device/{quote(did)}'>{e(name)}</a>"
+            f"<br><small class=muted>{e(did[:16])}…</small></td>"
             f"<td>{appr}</td>"
             f"<td>{e(fmt_age(d.get('last_seen')))}</td><td>{e(bat)}</td>"
             f"<td>{e(d.get('ip') or '-')}</td>"
             f"<td><a href='/stream/{quote(did)}'>stream</a></td></tr>")
-    body = ("<h1>Devices</h1><table><tr><th></th><th>id</th><th>approval</th>"
+    body = ("<h1>Devices</h1><table><tr><th></th><th>id / name</th><th>approval</th>"
             "<th>last seen</th>"
             "<th>battery</th><th>ip</th><th></th></tr>"
             + ("".join(rows) or "<tr><td colspan=7 class=muted>none yet</td></tr>")
@@ -245,14 +247,19 @@ def page_device(did):
         for h in hist[:50])
     appr = ("<b style='color:#2a2'>approved</b>" if d.get("approved")
             else "<i style='color:#c60'>pending</i>")
+    title = d.get("name") or did
     body = (
-        f"<h1>{e(did)}</h1>"
+        f"<h1>{e(title)}</h1>"
+        f"<p><small class=muted>{e(did)}</small></p>"
         f"<p>status: <span class='dot {'on' if d.get('online') else 'off'}'></span>"
         f" {'online' if d.get('online') else 'offline'} · "
         f"approval: {appr} · "
         f"battery: {e(bat if bat is not None else '-')} · ip: {e(d.get('ip') or '-')} · "
         f"last seen: {e(fmt_age(d.get('last_seen')))} · "
         f"<a href='/stream/{quote(did)}'>stream</a></p>"
+        f"<form method='post' action='/device/{quote(did)}/rename'>"
+        f"<input type='text' name='name' placeholder='device name' value='{e(d.get('name') or '')}' size='24'>"
+        f" <button>Rename</button></form> "
         f"<form method='post' action='/device/{quote(did)}/approve'>"
         f"<button>{'Re-approve' if d.get('approved') else 'Approve device'}</button></form> "
         f"<form method='post' action='/device/{quote(did)}/revoke' class='danger'>"
@@ -384,6 +391,16 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         p = u.path.rstrip("/")
         qs = self._body_qs()
+        if p.startswith("/device/") and p.endswith("/rename"):
+            did = p[len("/device/"):-len("/rename")]
+            name = (qs.get("name") or [""])[0].strip()
+            try:
+                resp = ghostctl.rpc({"op": "rename", "device_id": did, "name": name})
+            except Exception as ex:
+                resp = {"ok": False, "error": str(ex)}
+            self._send(200, page_cmd_result(f"rename → {did}", resp,
+                                            f"/device/{quote(did)}"))
+            return
         if p.startswith("/device/") and p.endswith("/approve"):
             did = p[len("/device/"):-len("/approve")]
             try:

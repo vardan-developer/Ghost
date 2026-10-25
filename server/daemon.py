@@ -593,6 +593,15 @@ class Daemon:
             if op == "pending":
                 out = {d: self.devices[d] for d in self.pending_ids()}
                 return {"ok": True, "pending": out}
+            if op == "rename":
+                did, name = req["device_id"], str(req.get("name", "")).strip()
+                if did not in self.devices:
+                    return {"ok": False, "error": f"unknown device {did}"}
+                if not name:
+                    return {"ok": False, "error": "rename: missing name"}
+                self.touch(did, online=None, extra={"name": name})
+                log(f"device {did} renamed to {name!r} via admin")
+                return {"ok": True, "device_id": did, "name": name}
             if op == "approve":
                 did = req["device_id"]
                 if did not in self.devices:
