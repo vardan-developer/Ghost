@@ -6,6 +6,7 @@ event handlers, no inline script. CSP-friendly (script-src 'self').
 import html
 import json
 import time
+from urllib.parse import quote
 
 def e(s):
     """Escape for HTML text/attribute contexts."""
@@ -65,9 +66,9 @@ def json_summary(resp, max_len=2000):
 CSS = r"""
 :root {
   color-scheme: dark;
-  --bg:#101213; --card:#181b1c; --card2:#1e2223; --text:#edf0ed;
-  --muted:#a0aaa5; --line:#303637; --accent:#c4e899; --accent2:#b3d487;
-  --ok:#a9dd82; --warn:#f0c581; --err:#f1a29b; --danger:#422727;
+  --bg:#090b0e; --card:#11151a; --card2:#171c22; --text:#e7ebef;
+  --muted:#a3abb7; --line:#2b333f; --accent:#ee898c; --accent2:#c6626a;
+  --ok:#80c6ad; --warn:#e2bd82; --err:#f29898; --danger:#422727;
   --radius:3px; --pad:22px;
   font-synthesis:none;
 }
@@ -86,17 +87,17 @@ h3 { font-size:16px; font-weight:550; margin-bottom:18px; }
 .icon { width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; flex-shrink:0; vertical-align:middle; }
 .skip-link { position:fixed; left:20px; top:-80px; z-index:100; padding:12px; background:var(--accent); color:var(--bg); }
 .skip-link:focus { top:12px; }
-nav { position:fixed; inset:0 auto 0 0; width:228px; padding:35px 20px 24px; background:#151819; border-right:1px solid var(--line); display:flex; flex-direction:column; gap:8px; z-index:20; }
+nav { position:fixed; inset:0 auto 0 0; width:228px; padding:35px 20px 24px; background:#0c1015; border-right:1px solid var(--line); display:flex; flex-direction:column; gap:8px; z-index:20; }
 nav .brand { display:flex; align-items:center; gap:10px; color:var(--text); font-size:23px; letter-spacing:-.9px; font-weight:650; padding:0 12px 37px; }
 .brand-mark { display:grid; place-items:center; width:32px; height:32px; border-radius:3px; background:var(--accent); color:#182112; }
 nav .nav-caption { padding:0 14px 12px; font-size:10px; letter-spacing:1.6px; color:var(--muted); }
 nav a.nav-link { color:var(--muted); padding:12px 14px; display:flex; align-items:center; gap:12px; border-radius:3px; }
 nav a.nav-link:hover { background:var(--card2); color:var(--text); text-decoration:none; }
-nav a.active { background:#293326; color:var(--accent); }
+nav a.active { background:#2b1a21; color:var(--accent); }
 .nav-bottom { margin-top:auto; padding:20px 12px 0; border-top:1px solid var(--line); }
 .nav-bottom p { margin:8px 0 0; font-size:11px; }
 .operator { display:flex; align-items:center; gap:10px; margin-top:24px; font-size:12px; }
-.avatar { width:32px; height:32px; display:grid; place-items:center; border:1px solid #4c554c; border-radius:3px; background:#2a312b; color:var(--accent); font-size:10px; font-weight:650; }
+.avatar { width:32px; height:32px; display:grid; place-items:center; border:1px solid #4c554c; border-radius:3px; background:#221921; color:var(--accent); font-size:10px; font-weight:650; }
 .topbar { height:83px; border-bottom:1px solid var(--line); margin-left:228px; padding:0 40px; display:flex; justify-content:space-between; align-items:center; color:var(--muted); font-size:12px; gap:12px; }
 .breadcrumb { display:flex; align-items:center; gap:12px; min-width:0; }
 .breadcrumb span:last-child { color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:55vw; }
@@ -111,8 +112,8 @@ main { margin-left:228px; max-width:1680px; padding:38px 40px 64px; min-width:0;
 .stat-top { display:flex; align-items:center; justify-content:space-between; gap:8px; color:var(--muted); font-size:12px; }
 .stat strong { font-variant-numeric:tabular-nums; display:block; font-size:34px; letter-spacing:-1px; font-weight:500; line-height:1.2; margin:17px 0 8px; }
 .stat small { font-size:11px; color:var(--muted); }
-.stat.online { background:#202b20; border-color:#41543a; }
-.stat.online strong,.stat.online .icon { color:var(--accent); }
+.stat.online { background:#132320; border-color:#294d41; }
+.stat.online strong,.stat.online .icon { color:var(--ok); }
 .section-title { display:flex; align-items:center; gap:10px; margin:0 0 18px; font-size:18px; }
 .section-title .count { color:var(--muted); font-size:11px; border:1px solid var(--line); border-radius:3px; padding:1px 7px; }
 .card { background:var(--card); border:1px solid var(--line); border-radius:var(--radius); padding:var(--pad); margin-bottom:20px; min-width:0; }
@@ -121,7 +122,7 @@ main { margin-left:228px; max-width:1680px; padding:38px 40px 64px; min-width:0;
 .row { display:flex; flex-wrap:wrap; align-items:center; gap:10px; min-width:0; }
 .badge { display:inline-flex; align-items:center; gap:6px; padding:4px 9px; border-radius:3px; font-size:10px; font-weight:550; letter-spacing:.2px; white-space:nowrap; }
 .badge::before { content:""; width:5px; height:5px; border-radius:50%; background:currentColor; }
-.badge.ok { background:#29392b; color:var(--ok); }
+.badge.ok { background:#173029; color:var(--ok); }
 .badge.warn { background:#3b3226; color:var(--warn); }
 .badge.err { background:#3a2928; color:var(--err); }
 .badge.muted { background:#282d2e; color:#a0aaa5; }
@@ -129,20 +130,20 @@ main { margin-left:228px; max-width:1680px; padding:38px 40px 64px; min-width:0;
 .dot.on { background:var(--ok); }
 .dot.off { background:var(--muted); }
 .dot.pending { background:var(--warn); }
-button,.btn { display:inline-flex; justify-content:center; align-items:center; gap:8px; background:var(--accent); color:#1a2514; border:1px solid var(--accent); border-radius:3px; padding:10px 15px; font-family:inherit; font-size:13px; font-weight:550; line-height:1.4; cursor:pointer; text-decoration:none; min-height:42px; transition:background .16s,border-color .16s,transform .16s; }
-button:hover,.btn:hover { background:#dfffa9; border-color:#dfffa9; text-decoration:none; }
+button,.btn { display:inline-flex; justify-content:center; align-items:center; gap:8px; background:var(--accent); color:#170e12; border:1px solid var(--accent); border-radius:3px; padding:10px 15px; font-family:inherit; font-size:13px; font-weight:550; line-height:1.4; cursor:pointer; text-decoration:none; min-height:42px; transition:background .16s,border-color .16s,transform .16s; }
+button:hover,.btn:hover { background:#f5b2b4; border-color:#f5b2b4; text-decoration:none; }
 button:active,.btn:active { transform:translateY(1px); }
 button.danger,.btn.danger { background:transparent; border-color:#65403c; color:var(--err); }
 button.danger:hover { background:var(--danger); }
 button.secondary,.btn.secondary { background:transparent; border-color:#424a47; color:var(--text); }
-button.secondary:hover,.btn.secondary:hover { background:#2b3330; border-color:#737e74; }
+button.secondary:hover,.btn.secondary:hover { background:#26202a; border-color:#737e74; }
 button.small,.btn.small { font-size:11px; padding:8px 11px; min-height:38px; }
 button:disabled { opacity:.5; cursor:not-allowed; }
-input,select,textarea { min-width:0; max-width:100%; background:#121617; color:var(--text); border:1px solid #3b4340; border-radius:3px; padding:11px 12px; font:inherit; font-size:13px; min-height:42px; }
+input,select,textarea { min-width:0; max-width:100%; background:#0b1016; color:var(--text); border:1px solid #3b4340; border-radius:3px; padding:11px 12px; font:inherit; font-size:13px; min-height:42px; }
 input::placeholder,textarea::placeholder { color:#929c96; }
 input[type=checkbox] { accent-color:var(--accent); min-height:0; width:14px; height:14px; margin:0; }
 input[type=file] { padding:7px; }
-input::file-selector-button { background:#2c352d; color:var(--text); border:0; padding:7px 10px; border-radius:3px; margin-right:10px; cursor:pointer; }
+input::file-selector-button { background:#27212a; color:var(--text); border:0; padding:7px 10px; border-radius:3px; margin-right:10px; cursor:pointer; }
 :focus-visible { outline:2px solid var(--accent); outline-offset:4px; }
 input:focus,select:focus,textarea:focus { border-color:var(--accent); }
 table { width:100%; border-collapse:collapse; }
@@ -151,7 +152,7 @@ th { color:var(--muted); font-weight:500; font-size:10px; text-transform:upperca
 tr:last-child td { border-bottom:none; }
 .table-card { overflow-x:auto; }
 .table-card table { min-width:650px; }
-pre { background:#111516; border:1px solid var(--line); border-radius:3px; padding:18px; overflow-x:auto; font-size:12px; white-space:pre-wrap; word-break:break-word; max-height:440px; }
+pre { background:#080c12; border:1px solid var(--line); border-radius:3px; padding:18px; overflow-x:auto; font-size:12px; white-space:pre-wrap; word-break:break-word; max-height:440px; }
 code { font-size:.88em; }
 details { margin:6px 0; }
 summary { cursor:pointer; color:var(--accent); font-size:12px; }
@@ -186,7 +187,7 @@ details>div { margin-top:12px; padding-left:12px; border-left:2px solid var(--li
 .device-card .head { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
 .device-identity { display:flex; align-items:center; gap:12px; min-width:0; }
 .device-identity>div { min-width:0; }
-.device-glyph { width:42px; height:46px; border:1px solid #495345; border-radius:3px; background:#283025; color:var(--accent); display:grid; place-items:center; flex-shrink:0; }
+.device-glyph { width:42px; height:46px; border:1px solid #495345; border-radius:3px; background:#241920; color:var(--accent); display:grid; place-items:center; flex-shrink:0; }
 .device-card .head a { color:var(--text); font-size:15px; font-weight:550; letter-spacing:-.25px; overflow-wrap:anywhere; }
 .device-card .head .mono { font-size:10px; margin-top:4px; overflow-wrap:anywhere; }
 .device-card .meta { display:grid; grid-template-columns:1fr 1fr; gap:7px 16px; margin:22px 0; font-size:11px; }
@@ -220,7 +221,7 @@ details>div { margin-top:12px; padding-left:12px; border-left:2px solid var(--li
 @media(max-width:560px) {
   :root { --pad:18px; }
   body { font-size:14px; }
-  nav { inset:auto 0 0; width:auto; height:calc(68px + env(safe-area-inset-bottom)); padding:8px 20px calc(8px + env(safe-area-inset-bottom)); border-right:0; border-top:1px solid var(--line); flex-direction:row; justify-content:space-around; gap:12px; background:#151819fa; }
+  nav { inset:auto 0 0; width:auto; height:calc(68px + env(safe-area-inset-bottom)); padding:8px 20px calc(8px + env(safe-area-inset-bottom)); border-right:0; border-top:1px solid var(--line); flex-direction:row; justify-content:space-around; gap:12px; background:#0c1015fa; }
   nav .brand { display:none; }
   nav a.nav-link { flex:1; flex-direction:column; gap:2px; padding:5px 12px; border-radius:3px; font-size:10px; }
   nav .nav-label { display:inline; }
@@ -256,15 +257,186 @@ details>div { margin-top:12px; padding-left:12px; border-left:2px solid var(--li
   .page-footer { flex-direction:column; gap:4px; margin-top:28px; }
 }
 @media(prefers-reduced-motion:reduce) { *,*::before,*::after { transition:none!important; scroll-behavior:auto!important; } }
+/* Dense workspaces use progressive disclosure, with the primary task visible. */
+body { -webkit-tap-highlight-color:#ee898c30; }
+button,.btn,summary { touch-action:manipulation; }
+h1,h2,h3,.brand,.stat strong,.tab,.eyebrow,.mono,code,pre,.tool-picker>summary,.execution-heading { font-family:"IBM Plex Mono",ui-monospace,monospace; font-weight:400; }
+h1 { font-size:clamp(25px,3vw,36px); letter-spacing:-1.3px; text-wrap:balance; }
+.eyebrow { text-transform:none; letter-spacing:.4px; font-size:11px; }
+.brand-mark { background:transparent; border:1px solid var(--accent); color:var(--accent); }
+nav .brand { font-size:20px; letter-spacing:-1px; }
+.avatar { background:#221921; border-color:#614048; color:var(--accent); }
+main { background-image:linear-gradient(#53658205 1px,transparent 1px),linear-gradient(90deg,#53658205 1px,transparent 1px); background-size:36px 36px; }
+.section-title { font-size:16px; }
+.stat strong { font-size:29px; }
+.ui-disclosure { margin:0 0 18px; background:var(--card); border:1px solid var(--line); border-radius:3px; min-width:0; }
+.ui-disclosure>summary { display:flex; align-items:center; justify-content:space-between; gap:12px; list-style:none; padding:15px 18px; color:var(--text); font-weight:500; font-size:13px; min-height:48px; }
+.ui-disclosure>summary::-webkit-details-marker { display:none; }
+.ui-disclosure>summary::after { content:"+"; font:18px/1 ui-monospace,monospace; color:var(--muted); flex-shrink:0; }
+.ui-disclosure[open]>summary::after { content:"−"; }
+.ui-disclosure>summary:hover { background:#ffffff04; text-decoration:none; }
+.ui-disclosure>div { margin:0; padding:0 18px 18px; border:0; }
+.ui-disclosure[open]>summary { border-bottom:1px solid var(--line); margin-bottom:16px; }
+.device-context { display:flex; justify-content:space-between; flex-wrap:wrap; align-items:center; gap:16px; margin-bottom:24px; }
+.device-context h1 { margin:0 0 8px; }
+.device-context .row { gap:12px; }
+.device-context .mono { overflow-wrap:anywhere; }
+.device-summary { margin:0; border:0; padding:0; background:transparent; }
+.device-summary span { display:flex; flex-direction:column; gap:2px; color:var(--text); }
+.device-summary span small { color:var(--muted); }
+.management-actions { display:flex; flex-wrap:wrap; align-items:center; gap:12px; }
+.management-actions form { margin:0; }
+.management-actions form:first-child { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-right:auto; }
+.management-actions form:first-child input { width:200px; }
+.tool-picker { margin-bottom:22px; background:#0d1219; border-color:#3b414e; }
+.tool-picker>summary { display:none; }
+.tool-picker[open]>summary { margin:0; }
+.tool-picker>.tabs { margin:0; padding:0 8px; border:0; flex-wrap:wrap; gap:0; }
+.tab { display:flex; gap:9px; align-items:center; padding:15px 22px; }
+.tab.active { color:var(--accent); background:#251820; }
+.tool-sections { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; margin-bottom:26px; align-items:start; }
+.tool-section { margin:0; }
+.tool-section>summary { font-family:"IBM Plex Mono",ui-monospace,monospace; }
+.section-count { margin-left:auto; color:var(--muted); font:10px ui-monospace,monospace; }
+.command-list { display:flex; flex-wrap:wrap; gap:8px; }
+.command-list .action-form { padding:0; margin:0; border:0; border-radius:0; background:transparent; }
+.command-list .action-form:not(.field-form) { display:inline-flex; }
+.command-list .field-form { width:100%; padding-top:12px; margin-top:6px; border-top:1px solid var(--line); }
+.command-list .field-form:first-child { border-top:0; padding-top:0; margin-top:0; }
+.command-list .field-form label { font-family:inherit; font-size:12px; color:var(--text); margin-bottom:8px; }
+.command-list .field-form input { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12px; }
+.command-list .field-form .row { flex-wrap:nowrap; }
+.command-list .action-form button { background:transparent; border-color:#444956; color:var(--text); }
+.command-list .action-form button:hover { background:#30212c; border-color:var(--accent); }
+.command-list .action-form button.danger { color:var(--err); border-color:#75424c; }
+.workspace-header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:28px 0 16px; }
+.workspace-header h2 { margin:0; }
+.workspace-header span { color:var(--muted); font-size:11px; }
+.file-browser { border:1px solid #3c4654; padding:0; margin-bottom:16px; background:#0d1219; }
+.browser-heading { display:flex; align-items:center; justify-content:space-between; padding:17px 20px; border-bottom:1px solid var(--line); gap:12px; }
+.browser-heading h3 { display:flex; gap:10px; align-items:center; margin:0; font-size:14px; }
+.browser-heading h3 .icon { color:var(--accent); }
+.browser-toolbar { display:flex; flex-wrap:wrap; gap:8px; padding:16px 18px 8px; }
+.browser-toolbar input { flex:1; min-width:120px; font-family:"IBM Plex Mono",ui-monospace,monospace; }
+.browser-shortcuts { display:flex; flex-wrap:wrap; gap:8px; padding:8px 18px 14px; }
+.browser-shortcuts button { min-height:32px; padding:5px 10px; font-size:11px; background:transparent; border-color:var(--line); color:var(--muted); }
+.browser-shortcuts button:hover { color:var(--text); border-color:var(--accent); }
+.browser-filter { width:calc(100% - 36px); margin:0 18px 14px; min-height:36px; font-size:12px; }
+.breadcrumb-path { display:flex; flex-wrap:wrap; align-items:center; gap:4px; padding:12px 18px; border-block:1px solid var(--line); }
+.breadcrumb-path button { min-height:28px; padding:3px 6px; border:0; background:transparent; color:var(--muted); font:11px "IBM Plex Mono",monospace; overflow-wrap:anywhere; }
+.breadcrumb-path button:hover { color:var(--accent); }
+.file-list { padding:0 18px; max-height:480px; overflow:auto; overscroll-behavior:contain; }
+.file-row { display:grid; grid-template-columns:minmax(0,1fr) 80px 82px; align-items:center; gap:12px; padding:11px 0; border-bottom:1px solid var(--line); content-visibility:auto; contain-intrinsic-size:auto 60px; }
+.file-row:last-child { border:0; }
+.file-name { display:flex; gap:10px; align-items:center; min-width:0; overflow-wrap:anywhere; }
+.file-name .icon { color:var(--muted); width:18px; }
+.file-name button { padding:4px 0; min-height:32px; border:0; background:transparent; color:var(--accent); text-align:left; font:inherit; justify-content:flex-start; overflow-wrap:anywhere; }
+.file-name span { min-width:0; overflow-wrap:anywhere; font-size:12px; }
+.file-size { color:var(--muted); font:11px "IBM Plex Mono",monospace; text-align:right; }
+.browser-note { padding:13px 18px; font-size:12px; color:var(--muted); margin:0; }
+.browser-note.error { color:var(--err); }
+.transfer-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; margin-bottom:16px; align-items:start; }
+.transfer-grid .ui-disclosure { margin:0; }
+.transfer-grid .row { gap:8px; }
+.transfer-grid input:not([type=hidden]) { width:100%; flex-basis:100%; }
+.execution-panel { margin:0 0 22px; border:1px solid #55505b; background:#0c1117; padding:0; scroll-margin-block:20px 100px; }
+.execution-heading { padding:14px 18px; border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between; gap:12px; font-size:12px; }
+.execution-heading>span { display:flex; align-items:center; gap:10px; }
+.execution-heading .icon { color:var(--accent); }
+.execution-heading button { background:transparent; color:var(--muted); border:0; min-height:28px; padding:3px 8px; }
+.execution-body { padding:18px; }
+.execution-body>p { margin:0; }
+.execution-state { margin:0 0 14px; font-size:12px; display:flex; align-items:center; gap:10px; }
+.execution-result { border-bottom:1px solid var(--line); margin-bottom:18px; padding-bottom:18px; }
+.execution-result:last-child { margin:0; padding:0; border:0; }
+.execution-result h3 { display:flex; align-items:center; justify-content:space-between; gap:12px; font-family:inherit; font-size:13px; margin:0 0 14px; }
+.execution-result details { margin-top:18px; }
+.result-fields { margin:0; display:grid; grid-template-columns:minmax(90px,.35fr) minmax(0,1fr); gap:8px 20px; font-size:13px; }
+.result-fields dt { color:var(--muted); overflow-wrap:anywhere; }
+.result-fields dd { margin:0; overflow-wrap:anywhere; min-width:0; }
+.result-fields .result-fields { display:block; }
+.result-fields .result-fields dt { margin-top:8px; }
+.result-text { margin:0; white-space:pre-wrap; word-break:break-word; font-size:12px; }
+.result-list { padding-left:20px; margin:0; }
+.result-table { overflow:auto; max-height:420px; }
+.result-table table { min-width:420px; }
+.result-table td { font-size:12px; }
+.result-error { border-left:2px solid var(--err); padding:12px 16px; background:#2b171e; color:var(--err); }
+#result-content { overflow-wrap:anywhere; }
+#command-output:focus { outline:1px solid var(--accent); outline-offset:4px; }
+body.command-busy [data-inline-command] button[type=submit],body.command-busy [data-folder] { opacity:.55; }
+.device-more { border:0; background:transparent; margin:14px 0 0; }
+.device-more>summary { padding:8px 0; min-height:36px; color:var(--muted); font-size:11px; }
+.device-more[open]>summary { border:0; margin:0 0 8px; }
+.device-more>div { padding:0; }
+.device-more .meta { margin:10px 0 16px; }
+.device-actions { margin-top:18px; }
+.device-management { margin-top:14px; }
+.device-management summary { color:var(--muted); font-size:11px; }
+.filter-menu { border:0; margin:0; background:transparent; }
+.filter-menu>summary { display:none; }
+.filter-menu>div { display:flex; align-items:center; gap:18px; padding:0; }
+.filter-menu[open]>summary { border:0; margin:0; }
+@media(max-width:900px) { .tool-sections,.transfer-grid { grid-template-columns:1fr; } }
+@media(max-width:600px) {
+  .tool-picker>summary { display:flex; }
+  .tool-picker>.tabs { flex-direction:column; gap:0; padding:8px; }
+  .tool-picker .tab { justify-content:flex-start; padding:12px; border:0; border-left:2px solid transparent; }
+  .tool-picker .tab.active { border-left-color:var(--accent); }
+  .tool-picker[open]>summary { border-bottom:1px solid var(--line); }
+  .tool-sections { gap:10px; }
+  .tool-section[open]>summary { margin-bottom:12px; }
+  .device-context { gap:14px; }
+  .device-context>.btn { width:100%; }
+  .management-actions { gap:8px; }
+  .management-actions form:first-child { width:100%; }
+  .management-actions form:first-child input { width:100%; }
+  .workspace-header span { display:none; }
+  .file-row { grid-template-columns:minmax(0,1fr) 76px; gap:4px 12px; }
+  .file-name { grid-row:span 2; }
+  .file-size { grid-column:2; font-size:10px; }
+  .file-row>.btn { grid-column:2; font-size:10px; padding:4px; min-height:36px; }
+  .browser-toolbar { padding:14px; }
+  .browser-toolbar input { flex-basis:100%; width:100%; font-size:16px; }
+  .browser-toolbar button { flex:1; }
+  .browser-shortcuts { padding:0 14px 12px; }
+  .browser-shortcuts button { min-height:44px; }
+  .browser-heading { padding:14px; }
+  .browser-filter { margin:0 14px 14px; width:calc(100% - 28px); font-size:16px; }
+  .file-list { padding:0 14px; }
+  .breadcrumb-path { padding:10px 14px; }
+  .breadcrumb-path button { min-height:44px; }
+  .browser-note { padding:12px 14px; }
+  .file-name button { min-height:44px; }
+  .result-fields { grid-template-columns:1fr; gap:3px; }
+  .result-fields dd { margin-bottom:10px; }
+  .execution-heading,.execution-body { padding:14px; }
+  .execution-heading button { min-height:44px; }
+  .execution-result h3 { align-items:flex-start; }
+  .command-list .field-form .row { flex-wrap:wrap; }
+  .command-list .field-form input { font-size:16px; }
+  .filter-menu { width:100%; }
+  .filter-menu>summary { display:flex; padding:8px 0; }
+  .filter-menu>div { flex-wrap:wrap; padding-bottom:4px; }
+}
+
 """
 
 # ---------------------------------------------------------------------------
 # JS — external only. Handles CSRF injection, confirmations, search, tabs,
 # frame polling, upload progress, and abort. No inline handlers.
 # ---------------------------------------------------------------------------
-JS = r"""
+FONT_WOFF2 = 'd09GMgABAAAAACdEAA4AAAAAXlwAACbsAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGkwbhlIchlYGYACEWBEQCoGLeO1oC4QyAAE2AiQDiGAEIAWDOgeJaRsgTCXjmJV4HABeejlEUSpIxx1F5SSZ/f+nBE6G2DIXqri/UBTS9lDe2yMwPic5IcpcpgAQM++/dSvdZeS1cFF0d6OoLLmsMo+HNe755qvdcvQs89PIKwL9V/Q0yyDR0V64H/wl8JIjNPZJLlG0RlbP3gMF2AGxAhYGUccYUnFoVISOfWEDQiLsD/w2/w9pYCQqGAiKCoKggAVIXCJFvCBigvas2atW31y+9xfl5t5chrqIcvF6e9tfxavtpfzz/cXO/Qu8ZtECx0lhBZJQYGHqCTfvXn+qlG539RZEEPhZpV8K/LGbPWzuGgZoQIAsgX6p692VDmbeSnPVT50qJVDFFbFk++wjf2fGmXjSA9mtVDQhqMIltoxD6+ryf2hsUIJDlnI4+9c+eDmwMNcO2NjKpKJpEdXfA40dicIZ1i+w9oQyti+DWotm2wqHydT/90xYZMwU7P7//ma1/3HnRZiVsJrp1qQaOf0jTLKsSendTr/yeO8TPjx+5BOFMCFxwsoPkUMySoYiZJx1y7ozzjg7rHslWu6WJkUnWlXb1mbwT7/2q3uGeagkklkJojHu+n+z3HnzK5JIalH8W6dUQiNkQiJDKqRGKJnpaAyXC1qDylFRfG/lT/3sQXcrgmBRjG9kUdyUUvHkK+a9voyt8qLytRE3GGAMr7sA0/xQ8YZBZx9CGIuUCeMrE8ZqE8aACWOfCePMDxUTwEwALgEJhoMBJimUwh0/aUQh+TqptQFod1d7E4TAA/q4wCYkxgtaw+eDkBVvE4IQNucQmXnh+YJmIEEwKeVDEMBvv3nnhZ99775b7rvinBOGvXB/tuDv7bfTFgNW+/JFgRZt3uP7+tmmQkbwvk4tq7OeBTHprVGYegoPRsHKuAQw2jQymZAKIuBDKGghQbCUhQtAAQmk4GSmFfpEUkZwCTIhBlG3xPKBKQNg0uhERDievEy+QkJkQn5HK7gGhRTgAR9Sb9w0vsCRhfk+Hwa0U0BLFo0LYEYAMobxAuKjY7CX4Ux07xBZ5Rur2FWvmIfq0itGohBbZqJnVTvbMGMGkQvovWm9SuqLYWbUrPN+mGjAalAYzR0ZPoRCNlyDJOgCJvhAMijBCAIQAgVSQAIxiMrMsCWGB3B6m74+AngJxjZbcwglhHgwgIWgOTBJjp2EGn42QUZBTDQMJ/BEyhw+Bp4H7/cDGiIvPrduNbZA8WoCt6bmRrBP/+dU7AosE3h2NLaCfmdA4ACL8HK8OmI15YVSahn8YAy+YqwgRF9ZXUACE5Rg1jJ5I4WA8cB4YrzuhmOEGJSCRKtg1XCRHPAIcrZGM79li1pWiYJg+SH6BU4lqUDuIB4dJeP39pHEWxJiGbuRW1aF1yKbkHt1RCJcTNHI/HxQV18xxHMSWUXYjd3IPV3N6ks2/F9kytiN3M9EgNWW6TPbZK3quTlZ6SlkScVC96uSP8f7+uGdX+LNsagvtKvP2qM+rUU8ESJDFbuxG7uxG7uxG7uRO4hBlI5FZ8qSTYIINBObfOBQ9LKDgAAjMPBGXRkWXiQh8Np+lNeY2kjn5lAUHFCpx2B5fgxSEaLjoNNgYV9ROGeQNyRMbIETwq88npU7xmM8ABucEZtUmGABX44sQQD1xDQD5yhlrhInHPfCkgheBCwOlvyZ4J7fJu4zeuYw0egpsGrHY/57CzAEE3wdMM8ANWBHgRVwQAESi84IA80gJHSSDOGMvdlnpMgk4+Qy2XTjGH7y61hdqG/r+4bB4XFeOMaKEBqFFk2j05i0NFoWDaFNxtJjl8YupwfRQ8fHwQwanixyRdymGIgfax3VsSXgGs5z62BaOC1yP1NpmW/2yPEGMAr6dwB9I6BXgv/Hf8L/R/8L+PcH+Pd7xAfgw+UR/VHOI+oj2k8PfzL8VPGT+8fqHy2AATgKXAXuAw90g+wxrci24IYhW8KDjLNIIZN281WTMSpWok3XM+D/uYabjsE0U01XRK5UhTId1P6CUa6GS2ehHOaYZ7YFatX5bIImdrMoNfikxSTX3fCnq+rNMA6zmhV45onnnHbbYae9dtljn/2GHXLYEceMGHXUQceddsJJZ50y2RmXXXDRJVecN+gLPXr167PQIot9aallllvlf1ZYaYk1NlhrnY3Wm2LAVl/bYsg2m213zqbwGBwGiyGAWS4rizz5MHA8eQtA6N1cQJYBagfIRrDwAbDsCzA8ATULUAMVsyrFxTIBtmCMimXNFFMci0IprkxelOA4G/buwiXFxLwBKDa9Tmx88OgRIHyUZsfQUWt0W+URo+mm3CrFSkMn5uUOTizTE61KHOpx5cZ8tmaYnb0+jTryKDFQqcDNohn2rH2q40d0hLrhyrFMtmf9l2EGC8h3OndFyfqXbuaqaTgSHgQfJ1a+Uh3ga+0G4TKAb2LhJGVKpyL14Evocg9pkRD8lCeQQjBQIAQPiXbDxjHGn59shWKhp6+m6YZFKBZdUX0oik4pq8aiFDJlGlRgf9JXLPHy9iKE7g3p5wwsa0pI18d1U9GfoZjVbLzIeq2AzNdChxNSAQakfDkXreWhczmrqnDVUlCqmadeQvb/5tRMrGC5wySAgGiHUbiLIYDQ8g774oIUIZnQcpxt0JT7XqR28wu8hcRvYekhifK25o5aX94ehN9FCWohUdb5B4Q0YqMgViusTiKcXFvSAnreg+uFUxtV2h03zTeZALt1hpXnjSibBbMysayjU6DTaSAT2W1KTrEmn9s+lz6wyFdLIJJUnTnVJt9uJ9BhapQC13pS6EZ52AUdzHVfBuelTrdr39gebCVElAhZ5wPep0TIQtgUE4pZeUg8VvKma/TGCnJV0DIHhyYMS0b9Yxxo/TphXLYA79lL37DttQBw7j1LJVmaohtD7gikJQi2YiqWKiTXbIymG/YEeUjcYOPIA8ywCAMAxkpGJ9WunGLdmdF+KxQDG0DBuYy2l+Rejz/amFI2O0yv2IIYcWRxeNhfDE/Pz3ADHw7TKpuH68fBUigMLfnxocnZaQAM9flUg1v+KYvawitcJlYX4WVIVAsxZ0aQDpmJ94h1mcxxLMVGN0GODIdInnMwdUkCzumd/jIxugjgiMhnCxKuDVs6bskmJ8dcpichkzkO3lhytG+9HfM2ZA6CihiMyFdLLKaEV6cjWDu1vo4B9abUN2ZceKtzOZZINSBu9570LRnaOC5CyYZOZ5yad+86Ka4eLAq1oaa+KFtuwfQoJ2hP0ytkv4BE2kaOLQWWtLd2ZMgAkDKKHOmF14wsB0qCAUVRO0fvNk2lHwNRPMHBoNf+De+w3hVH7S9aoLRYg4ZS/IT8Nv6ZYYQ9FT1m7lVIJ8xc67KP7VEmEIvk+Af3flR8WYenDbZdxP1R59xnM9F76INHNFctnFtgXC1ggmjg8bvh+T5Gd1uMx1gU7CT8TE177hEt/FDkRKnPrD53qJHhhhwn0wkLSnyBO3P9jHJHJR43Mpx+s7qmSNExcgDX3bjX7q0MZqj/5LqYG4EtsQRm89SXDC22WKLewPWJnQrtXzvCsHTc0rLheskEWrYajcnkaZBudPispeFhHShUiZaRjZdgbIxmR+PFQDVEBzaGgINNGO69JfxxLyvvDAvpLEK8unH9QyyQATd40hj27Y+ciPsBz3g0nJu/6dFaeEiZRrVF98Ua6cTa/Uo3VWFqKohzvIU9kOByeQpz5JDgduZ1IWK1rRgKvV4D47LhYsPEsTY7zI1OOpIk0aajYnnI6XAVW9oENY/I77VlsDKsErYhgcGVHOtN31+Sodaimp1tDFXShKbrGJdSxHCCa6WFjOlb2tf+K6dCmXss1eBypifU35VNA/bhnWqAqBMl/8PS7yl6zEzWTwIBSdGttI82ZRACElhHk7tGVWiHJUJZrRTXEqu0DS1hINQMDMsQjEi3WseEw0SJinJVHwpuHrZ355AnhAxJpzGSCHPpKAJEYCtBEmoyDyu3jtqO5uWoEGoKOoKaBm1dYrGUqEpGOY9TtEsK+G1svHRIBzfpz/4cni7NeAZN5OYpAhUDIo7oQ/V0qNb+O35lozaUgXacE/JWLdP2rwIl54wtMAa08/P3PpMdvZTbrUBS5vhSSevmTd6eJ/J/NmtQdHHx3uGjUYeIivYMHU6MftG7XQYYgmZWVSLV1ggvhUMBakFBj92EFbZrRaQvne5SNAlqw67rARfDfeWtNEn/r3ZaY237nFkhQiK93kAJqLm2jPLNMccaMB+DOZGmpQG8TwqcwiXgqTYMnaF1DSFmhlSEFMf03L9HwXRlSoLCEDmRXEMdGZbbHO34nYsMq7JY7eXPjglfoiK5KjBLy6WQnAq5GsZLLwn4ZmyZoBEnhBWgziHbq3BcWf3waZv0sZ0vcCxkysRn2Cfv8bGiHLKPwN006tawWJirlqKGyyrGK/+Ld04Zb7phPyw83aUqkjSSFV3mso2vHIWOKJYSFH0VhL/YsFVVeGTl8p52n0kF39iOD7KM3RFvvlSs1oYejVWfL1noy80p7fbjbVaCiLJJwMjUwjz9GngVKuOwcX98Cy+JX1lZyB6o3DQw3jzi/ZlDJyS4klKfHLUlBir/PiuObcE8vaoptWfPg/rzya8hTckIZm3E+XVY1cWCTgpcgqXIeYI7y7/a+M8GycsxXHPpDd8mDBsOH8lUSP16ExMuRa3EJqdZWDT0guyoT/RQtpjGWrIWCVbxzpL+KdDIVtr10E6mP7oIQbPPyAxkzx7thvH+v85TN8GN9aLr+Pcf5sChdJYu11EyDql+8gv2M5U+eP2mdDpqzyCZxqYg8R18wUzFadpX239pnPfAuPWbWMmvszKuLA+HercvhuFmBS7AgTGioxL7nZIWS+5PPvOA23J/alSHKnZGzviqsPrgm8ueZagbBjobAgyjSXbZCiyasXpJiI+d6sWVQzTxOS376+5sG05qfMl/1PtD3ZrOxrGFgSTTiedP+hjyroo9k2pi9jjM90W1nr3KnH+dLoGTYtFutUQlVBtOHzbSktZkOBZ31E0snbBEhk3Un/JKy/MfTEOGL1naYNjFD84oqPhvoi3UXoiXOE7AWhmyr1E5jJmWtBLO1Isi5f7KcJD6osf+y4VDN0IdfOd0ec686yKH8l6k/zsGFyF3yGyuBad1Ez3qGS6WXZqmvm2+rPs81/7TFkDExfMHO8c4ut4kHO1K+qvS8lJ2kFpVT6pJKENQqvx02KqgHJmWCHGutU9qBzxqd/XthWGfV2p9DkcZs/tLvPh/TmhYEXK80iIqC/hVqLLwWlZt0ZeFxaevdofItuU20OmKTJYtZQ7PchCfRLmlHJnFdKtmPyxBaNumf9Z/ZFW7IRFjzyEtb3y3ZOZcsl3fK/n3ZWGFOk8ULFnqVs0zCqMnNjCq/tV5idHVaLFvm0Uc5kiltP150FUL4htHuHYmMPDxFygr9H1WjaIoZnGiC9l/B9aS8bNmAWF2LAAgS5FYBpul+zmfk+eV5fnZ0Xw89aZ7iY/5fcoMJcFHn5qTV5av09aaOprSMj9nC+SJqQXLQyM/JBTVF1kjteo4UQzXoQixNWnlCczQxB7Ymo/nlzWW1ffPnEn0oPc9xaMWvGVOFvXfLDVllKLO+peqNqJqh7scKH1iEYSsupv1dpA6wtcdSEgZdma2KrpCIompyFbb4tMNJXL04wMZm8eoLkyiO+hJhZ1xAmVK5vyKcqUIB0RgefqqEpAyHPFSdaxbIqVXSNT2eKEAjc9WxBSlM6eH0wt7t8QJDCmZQxX1irxvYrt6a+keiSS6RqsCq3L31GFkuF4gkmfvQm6uvYncfL/qDwMvyzxLP3tag1zKOj7ZxzmRkqiZhP9NkJeeQJWbdRGcrINe0UfoZep2xpEoeVJCpFyqj+D4Tty3b2XpXd+wH+NbKwv1ekVMiPSAgE+35JjVJtYxq3gBN4o7Xyzu3Lxd4ILt0be2Jo3TqlzVpQaLRCNBxOHfpdsiqi1g6GAcIweQjzG+1wnPH506inif2o0MQ9WcvxAckm8X97wPgxjSQC871D6x3MUXojvWue9dfpdZcYnksBy1QK7yYPFBBD9wEBkGEV4vxh8fYXOOKXF3JNwcVoG1Wl+o2BRH62ZNOeYxaD1XBNx4CypaCmCTRPZ4sTrGLZXEVHT0dotut6qQSGPcEUJEmZeL6lFXojxeJpTiLKg2LyjSchdLkxnTT7pmEfuqMSpXTF2BPJ9N+MeBqLQWlwrNlf90CdkDfFJeu6i/VF2QJBUbWdyQVxs+B1lIg2+lDFbCi05DEEddzVbz+ra4s+kSWVJiLscTm3vgh3RNnfmgyhbJBfqdyEwKQllgOvwaeT2VzhC+zgckJUqptuAt8OcwLk/3IPcFXm9n2+gjGUThNFnHvQqOOwo6erz4KjOuNm+PZ/6eWpCcJIz+W25qkNjw2TZjQ/Gxf04Ty+3dWXn4jLz8briDs4y3z7OMrY4yIt2Z/Tf/tNofGM/ibR+wmYytCmQV0xcg8Djrwu/IL7g30vxie5V7uSzXoWDkrbPKZc0Ra/7D7TIYdSyqLh6JTiR91GbJ00RJQrkga/2/i+XCE7wE3knhkmegIM2cOrJnD6U1k6eKoJKvamjzu/1O0/It0+pa62Sa+bTTft3zNbRroVRVBJSOnJ05bc+uXUgy8+wJLYq21TfU49WLTkgE5+hunfO1WWf+zakD5+iwrvK1WqeWwNFiwpwOIz+utenIzoOTRmbwNRFs8g4NbX6t3+0Y1DytrkHob8/dxEYMeXLtcuXjQjMcEAdI0FFUECCQYwGq3C3Yrdz74sNPI4TkKI3LQOFYaqz++twABH9lQ1SmVKba9Y8OfGwVHY/QUbQBV9R2/VPVb/F/L3dD9yg60aCDCyU/eC6rtpGeP5SaRhsmpxHlYmtHTbDJ4GE0jna9XacANklWxMsuos6z26jzJb2FTKYos9l9RivK0bKWFAWgwlZBgK1oCcsP2AStQkMRCc7R/1xVdWVltGLX9sSJW4Wb+QL+ZuFWeDXY8TC6rfFqo4jvDJtu3u8Ruc41WudbsOLE2ordqLNsW0FVvsc+Tum2pOYh9d7fIbCRVNqFVJ2e7eTnGHNVOWkrNSSTTyLCWBYZWz7NNQFtTadvOp+XItcYssUpfTofvU+iirExiu6a3gi2lonoxJc6pg4GRwbTCLkrG/n8xpWE3LRBdLHZr41rsjM1GjuTa7pTmxfDrzdGCt3Feg+C3sNdbJcpwSkaMUQu9rvjWbSztGinp6VQdN/AJHTAc3kyIafM2le0Al+6oqCv+EnFfVuZZb59Id62MH9+8QMUsEEfhsorDqHr8fb1m1LKP+ZBkPjZ0Bc/WXff8EX8ugux0V5DYH6gzbDXBgbqUTZ50lPGjhByyA7G+i8e2HSX0jz2DOKHd86ZOKyDiDv2F7c58nKRT44ckcsQGUFPXc8qMVLTBJaoqkhdciJZtXgh58y2KeC7VKeVpXlkqNMzMxBewftzjhRFMJtjIq+lyVl0lYZ6GH/euXphAoeuf+qIEnHVwa7eP96P3a6NitWblTmeUqPSlK+Fyb0OPefZ5De1qtre4uu+O/DwW0tGsLfHss8ZXGNkV4w5LS0G/b4gNiMZCZZP+uP92GnHvzSt0aTyVJlMulRXrdorfMZUSCalF8SJEVqF1Mzt0bYU2rc39DhMSpRT/kbel5ch5xqiuqJz+Wmx6DV7rFCtNZs0nhpVoh09KbArYGLqbMOVO3pSM7BJkqLo89E6ttaU/8GzVYaKLR2l9fWkt4hlaKvnh8g6adnRunvOaLFany8Xk8VWucFgJfpauM6GqDNFfiJtpkKhBcWtQdiImduja3E0KHe1ZQHGqJpoc2oaDf3+z974xK+3N+yXHR6SuOoofIQqkXJkDKwH4gwc5nUfeVh8rHvdebc89kZGAkfN9gyYBl8nFDZpCwnVuIqYfqUhobBr5fxJi8vs1YS7NilXzZYzUnbd/j5ey/YXaXLgfPMUY3WqtJqyqrY9em12mSMxW4zGC+XhTkG7JpOw6ttkiaa6uVlTIyGT2j4ZCeE2tctSaOxZMSvLv5Kl17PEU8yjcUPMVcyhONZWpUS5FVYTUDoK2d76R3og6R16yN56T7vuSRhKEAWTtA6HehzjGDnqjZljVtdLmQI8nNUaogTCjVBjKAifKAUhsyD4Sdae396Vfn2XZanpWb5WeOFCy1r0ZPQwfmhFJdD46VxlZ1ReTn0RcDoSCfw/5n6FsE7zjBRLlIqdEqvOQ6Ljq3LX2XAuBeKXoUjPEmvkd/TUJVkT9BGRiMqJeHefMxRvXwkYP1F610Q62vyMNkPxhry9RntWdWynzC5z9KCP9r156w0lYZqqhL4dDlOyPm/ARHnNQN6G3zgt9VHv7HDpXeJdKXR+itOU9rLWM3KoQ+OJVty1AKaKjpilZqR5BpkB13B9Gf9tpeYw1rP2Sk+akqb8RviRxhpk4pmDLNqPhN+mJJlOSiH8k+rub/1vT40PdSrsDT07W0vVcMjq9++IdgNbu8M10sHWCoXVMVFSFWJyuTDuNC+VdzrOnqc7ZseTsJZkLwc8e2erZ4Pnkhp1jYriviXCM2zcZZ0ulMN1RHCet91nZv6XxGzgfLSSdZY0XqYOJdTEKRO3L431HXv5rUc44lMRI0oGvr+nWGK/o1v5fFK+69NMeZWr9Xf6a4EdmNPAsdi4k0xG7mRFjciRKcqMJp9Rsmdp9nipglGYJk5z9KCPIdNST2K6S2cpz7PmlWl5V3HGIWpkwqakTNaypGjJw2isjAPsQqaCGkNVJCSQEnM6ma9c/0jKFH+8K0cUlp8bHRKdy8dG+U8WJI7YIt9REowcA4epihJTwj3CKXHpULXppZ37iGt/OTNMLpuHWyKlYbwZYMWb1wgFv1P+ou+sjD0ajt9SlSKaxxGZ+VpdpNnEeLNlaUNP8NFImVYu2c7M2PMl60iYN1+SuD86CdjFxvwyG4qWGQxoGWrD5HoB5z47m32fYy8b2M1x37xdHxe3/u03cUFNDrcx52nkrnTwakq6RN+kgt2a3inbLshD5BdyHuofatuhyD/p9U7dAcsfzFUsIc+bo1gc/0A3eUSXyuPiRzp4EX3Mhkf+j7enONOFpeeY+tNLO4KjGv2N1wOKVBXZzMy9B94ZQLz+xvXQeg0KBMntS8il28aJDiR+yPeIn7vioueiEVrwirCdPb6pCTbak5nzv/32LXV++pxNmkdt2ncX1SNRT8uuz/nuS55Lsw1Qd0Q9W3s6wH71ujA5e0Q5ITkyeYJynSacM51egFwjALtTsBzpOKObVlJXVyKUM3fi5YJMpzSFSCZTzFUyUVQD5ImZr3Kfyv6Wlqr+Yp86aY0MnyfL+Xgmq3LJ5l2E+bk2uRJfs12TnW519jnTrdkff/NUMQtSPKZpc0u8LU9Vz4ufq54y+tBpaY/9uhck5I/Bv0SGuiVxyhTfBKpLZd4YomRxY0wX7dEiS60U+2ZYn5ypMMpNSUHyPZdVhxnBMT93X39ImGkBsrcV36jgnxbn8hFCRYYqblk03dZQXkqsllYj+MoM65tBhB3y+1iiirEphuFoqKvyqJZO7uYvUPi+OfRX1jTRRRXpr2dKOeiRkdERVf/pjpIjHfgjHUWnO/pVmVfsGVhIytQZ9GanuSBHqNzMZO64I2v72oSJ5jwg4LJk9ARzbmeHCBuh4RWmBL+r9bes7txZER+TpstW4b5ViHzDeVMPhqKC9Itc/6R/eYNcPqKln6JrtzMHYv9r9efIXaTQY5bQ40OiXLTQmCeTyEmvdjn6bpGDFwX4ffnVAV9lkW9lf3OX/y0BV87axe+yTMkllBb5wim9EzIKGGJlTGl2dkxphtLESJHkpnfx+xVlK9yq4qIcLw0Hne6tzSmRdR9R5hnManOeQRmdGahTXhWXwf/71tYIp+jqtHuyJuKC1Hg6h3dRHfDc/GV4TamPXkXLc5YmkbAnJTFZba+3u5LEKGLKH3QtF0lOpjS19OJUlpxdi0tA8xO/YqqD3FJJUEWnfFX2sGXcaFy+Moll0Hd2iD5HaHkObtAJ7U+W1dUL0whQ3dS4r8pe1Y41Bbk7H1UT28vKBHG5SmE5VaxAFE57jiZCWZxRHYDseeJ36suV2LvMNemXVi5fVPT6iFm19eNa1dq/tqo+R0+rbp7fAoqpnbkb7irBW0G5NdNc19VHWe9Xc2hjp3AqqMq1yCysY11Aq2NH7lfl435ZvwewSUXN3NwD2VXrwmfkfWyvds5I2yeL+TaF7uz+NBCvYXRzKlc7rn3seXqInTllz65dVD3T/1AiPiG8YJuto8FSl9QGzlF06XZXVX1xMWXu2r7m6XbhIE/AGxRuB9fFaxbJwq7wqwnIVfk7E8XPcXvdiDYcwBPz18IebWqjV53oi2kyJMedCoe0AZmzai/6UYkUPxojtis/L9fzx2ipXMxLFsg2lOuvQ0Qs0xiGj2BFR3WNbfQ8m5qp5XPivvkDF0pN5BuzFOkPkh7fm8JgNkcR002cNGBXqqTOfCucqj3Hmj85wo9/zJawH8fb48aVBh739vI+HvhbDcfWlj5zJE+ZkI5E5ad+gP2bWwqdKYTg7RTKm1WqjWeEmT2JrFyjMetg6h8QVylY/fejwxxalHeYR5golpHKoD0P9Ah5QEnpWRpRliz6LzF2/jn8b0cYHEQI6u2D2f13rT+l8FJkkpbtuInbIKkyddK3p8/7RsXEUnEUSWTYvm6Nz7FbaQOe7YSv/6Rx76WmKeWQXClWasRxzYKRkoLfEwrWOCyDixmcIV4aIt8TJaWSqNKo9ZMGdfNmydLbfxdNC5cBu1IqE7HoXZ/ww8Io5u3MzNvMKOEw/lMXnRWbXHIx6kWoR+iLKIwbuSKGEuYVRom5Jrhf/8pk3F9FaXblCbBf13ZysgmntgD+eGcWHcFCTuEJRUMgKbsQYY48sL+0f/3xwWZfSiOUv0XeEsppS232DzduQPGZgvfTXkHJ+zTV2zdw3RuPu7cYG6uEDafCkXC4URezKsQvZFXMOn6NlAxStenoNi0dRp87evRJh5J/mhbdaJ+U3V1nYOeED7yLQP27gfDRZC3UNxQy5Q3V/wJA8K+eEuqxRviLKSEeq4H0G69fw4LKU/0tr24fDOT/08gcD7Nf3jDtfmZNJ+xsSR7pIvG8qtiHgXlDDO1Q41FRo6g500R7q30He57NDEfCEze4ZzIs3+/MnXmfX0NOGvzSDKQDy5zThD4Zcgr58rQE5dCJOMvwpvXQ93xlYOGetGOJoIA1jwkao7HyLHyZ63OMW2mN0ViomRcnRvN0yIVczbqJvaUVlgJo6IBlQmFeWALYxqcCS7O56oJKMVGfcaLDiIF5kOhjQoYkafIDgGilIkMSDF9ZaQUZkmDwN6JBgJWQIUkaAGQr/SdDEgwUKwEaIq2jJEghjcwab4wB5aZpGuSIBClgEGelGxKkgEESMLBIJUEKacDAI5UEKWClAm7Eerd6w8ZHlZcXNM0e7pZvm9/Cw/Id81t4Wr5t+Y7lu+a38LI8Zn7L8sbH8h3LY5bvm99Cl4mN8R/ih4mF7Ji+BFXTn+8CHg38ff2kGV/c7z4CWD4ffAa8iog5Hqef51M6yxeuTVtmY/Td3cyOesqKPklNxgoe7ud8XNVDL2ORA6sE/u8HgTpZo5Y3Nef36Yr5rZiN1Fb/lhgramvMroeUhEZoq3/dGA7qQa1CW/3rxuC5t/IX+1CXyLpFrrOOfMPya7zixvwRCx8J3FjRgXAyxkCA8zGgDrVDMEOlpsPc6pqNPLCiRjnteC4mM+SmE6gbYIbcdOQWzvjZMua3oiVkhkpNJ59hwTMmM+Sm03YgqFNITOVj5fyVn7I4E6PkqbIMzt+6iXvpvBfnE3phVdq2HvaOmqZ/ne4Tqt6KNdbHsDqtG2n8KfO43wgYoJz7dMWuub/4W/TCvQC8PeHG4f17b+S/v/9tWs9QBkzAAgR8Q7NY5zPeP69hTI9lWTnQCAViyoQmKKUTuKmnhDosEhWhUBlfJi4JFDMxGdFIEGIjBofUKnIuyMACKj2PbiFFykAq4CiimDgYUAgUj4NQchk6OsmySk+IQKo1C8QCwc8mefUaGjHEJtjNWX7CSpOuge1cRI9SPwMnJq5Tz2PKTJ1xzghqxXg1QR4cgA4C6GMhs3jNcrGL4SB4LsVzRyIb+Fn7sxhBpVYjFXIlCsJbKJVSYr56SnDPpVAK8KOaslLFMMKFxBCC2pDncs6FYpkrQylQPL+UhQjEzWo2soKtbGcXQ2zWfjkVtdrBqSZoUa1/uUrAXAb4H+Mc5QuG+ZUTA/cAeiEdTGCMJezkYn1lpOsuPTHvJgfYBMSPApBwTAr0GVjqEGFM8yavjauOi4OX7rvorxEMikcjWH7ujOBkWD2Cx9IyQkDmHCFiElg/bIP72ueBFllSjrep0Krubdt5F1ebbdi/rlmrGilyqRnpKJhYNKjSzaRZk2YcVlVqdGjg0squSqtyWHaeJhVXmpqjeY7mzUWLuS7bq0V2nTel+9ZllWy9xaRjzWvOQdi+izx86WgqEcO2asu9t+UaNLBr7LxNslU7VbZTbVbivr+8VW8nBu8qofdh4HhYUFHT0NLRMzAyfZs7dK0VvxdlY1fAoZBTkWIl4sRjSpAoCQtbMg6uFDx8qdIICIl6YLBi/b8PFiIUWZhwESioInlhCAgH+x2gEGiHKP6ieSM47IiDDjnnvBNO2ma7QXib0JH4kJIpVS5IjmPhwVOZF+br8YU+C62z3pwIGCL4IpJz8fPech8Mo4kR66wFNjtubh4wj4f/qTNBg3pNGg1o9kqLVm0meqBdpy4deUK3SaaYarKNptmn1zvTzTTLDG+Muuwit10q7LZEZV7wUpVLrrjqmutuuKnaLbfVuGupPfZ6a8w9te57bYWPfnHmX7Gxjuv1RPLHCBGKLEy4CBRUkaL6zZ6Yfu8PB2LRMcSJx5QgURIWtmScvvGtRfop/fdDuFL6MTx8qdIICImky5ApSzYxCakcMnIKyrQfg1V5uLjf387j1dFUx8Mu0Z9q9D7IWE3t5xGyjR3yTLMjFV5Xu9cvw8Z6ZGn2bG6qiirauzLC+zZT3HN59T9ljyvrOjmbtNV189625AG/eZY82KSprknWz3qGYeARA4cMPuLgIQcHAw9l8JEMDg4e8uPz0yXwwI4fPPHCgTcGTnxw4XcEs8KtU1qZCTiKZjvwwAsTY0Rcq+murKv62xeOd1V0tFdJ0X8RzQZVfmrj//8pzLu9rqGy6g93cXA4hLeaPOZjjnj/39u1+O+j5rLL66ZoPFR96ueT+KBxdJq3QMYQwc3gA/tDzw2hoQA='
+
+JS = "var ghostConsoleFont = " + json.dumps(FONT_WOFF2) + ";\n" + r"""
 (function () {
   "use strict";
+  if (window.FontFace) {
+    var fontBytes = Uint8Array.from(atob(ghostConsoleFont), function (c) { return c.charCodeAt(0); });
+    new FontFace("IBM Plex Mono", fontBytes.buffer, { weight: "400", display: "swap" })
+      .load().then(function (font) { document.fonts.add(font); }).catch(function () {});
+  }
+
 
   // ---- CSRF: inject hidden token into every form -------------------------
   var meta = document.querySelector('meta[name="csrf-token"]');
@@ -299,6 +471,12 @@ JS = r"""
     if (!tab) return;
     ev.preventDefault();
     var group = tab.getAttribute("data-tab-group");
+    var picker = tab.closest(".tool-picker");
+    if (picker) {
+      picker.querySelector("[data-active-tool]").textContent = tab.textContent.trim();
+      if (compact.matches) { picker.open = false; picker.querySelector("summary").focus(); }
+      history.replaceState(null, "", "#tool-" + tab.getAttribute("data-tab"));
+    }
     document.querySelectorAll('[data-tab-group="' + group + '"]').forEach(function (t) {
       t.classList.toggle("active", t === tab);
     });
@@ -307,6 +485,12 @@ JS = r"""
     });
   }, true);
 
+  var compact = window.matchMedia("(max-width: 600px)");
+  function adaptDisclosures() {
+    document.querySelectorAll("[data-responsive]").forEach(function (el) { el.open = !compact.matches; });
+  }
+  adaptDisclosures();
+  compact.addEventListener("change", adaptDisclosures);
   // ---- Search / filter ---------------------------------------------------
   var search = document.getElementById("device-search");
   if (search) {
@@ -339,6 +523,234 @@ JS = r"""
       if (search) search.dispatchEvent(new Event("input"));
     });
   }
+
+  // ---- Inline command output and file browsing ---------------------------
+  var output = document.getElementById("command-output");
+  var outputBody = document.getElementById("command-results");
+  var outputState = document.getElementById("command-state");
+  var commandBusy = false;
+  var browserForm = document.getElementById("browser-form");
+  var currentFolder = null;
+
+  function responseError(doc) {
+    return (doc.querySelector("main") || doc.body).textContent.replace(/\s+/g, " ").trim().slice(0, 400);
+  }
+
+  function parseResponse(text) {
+    var doc = new DOMParser().parseFromString(text, "text/html");
+    var raw = doc.getElementById("result-data");
+    var content = doc.getElementById("result-content");
+    if (!raw || !content) {
+      var message = responseError(doc);
+      throw new Error(message.slice(0, 400) || "The server returned no readable response. Reload and check command history before retrying.");
+    }
+    var data;
+    try { data = JSON.parse(raw.textContent); }
+    catch (error) { throw new Error("The response could not be read. Check saved command history before retrying."); }
+    return { ok: content.dataset.resultOk === "1", data: data, content: content, raw: raw.textContent };
+  }
+
+  function resultPayload(data) {
+    if (data && data.entry && typeof data.entry === "object") {
+      return Object.prototype.hasOwnProperty.call(data.entry, "result") ? data.entry.result : data.entry;
+    }
+    return data && Object.prototype.hasOwnProperty.call(data, "result") ? data.result : data;
+  }
+
+  function revealOutput() {
+    if (output) output.classList.remove("hidden");
+  }
+
+  function showResponse(label, response) {
+    if (!outputBody) return;
+    revealOutput();
+    var article = document.createElement("article");
+    article.className = "execution-result";
+    var heading = document.createElement("h3");
+    var title = document.createElement("span");
+    title.textContent = label;
+    heading.appendChild(title);
+    var status = document.createElement("span");
+    status.className = "badge " + (response.ok ? "ok" : "err");
+    status.textContent = response.ok ? "Completed" : "Failed";
+    heading.appendChild(status);
+    article.appendChild(heading);
+    article.appendChild(document.importNode(response.content, true));
+    article.lastChild.removeAttribute("id");
+    var details = document.createElement("details");
+    var summary = document.createElement("summary");
+    summary.textContent = "Technical details";
+    var pre = document.createElement("pre");
+    pre.textContent = response.raw;
+    details.append(summary, pre);
+    article.appendChild(details);
+    outputBody.prepend(article);
+    while (outputBody.children.length > 5) outputBody.lastElementChild.remove();
+    if (outputState) outputState.textContent = label + (response.ok ? " completed." : " failed. See the response below.");
+    output.focus({ preventScroll: true });
+    output.scrollIntoView({ block: "nearest", behavior: "instant" });
+  }
+
+  function showCommandError(message) {
+    revealOutput();
+    if (outputState) outputState.textContent = message;
+  }
+
+  async function sendCommand(form, overrides, quiet) {
+    if (commandBusy) throw new Error("Another command is running. Wait for its result before sending another.");
+    commandBusy = true;
+    document.body.classList.add("command-busy");
+    var buttons = Array.from(document.querySelectorAll("[data-inline-command] button[type=submit]"));
+    var enabled = buttons.filter(function (button) { return !button.disabled; });
+    enabled.forEach(function (button) { button.disabled = true; });
+    var params = new URLSearchParams(new FormData(form));
+    params.set("csrf_token", token);
+    if (overrides) Object.keys(overrides).forEach(function (key) { params.set(key, overrides[key]); });
+    var verb = params.get("verb") || "Command";
+    var started = Date.now();
+    var controller = new AbortController();
+    var timeout = setTimeout(function () { controller.abort(); }, 60000);
+    var ticker;
+    if (!quiet) {
+      revealOutput();
+      function updateElapsed() { outputState.textContent = verb + " running… " + Math.floor((Date.now() - started) / 1000) + "s"; }
+      updateElapsed(); ticker = setInterval(updateElapsed, 1000);
+      output.scrollIntoView({ block: "nearest", behavior: "instant" });
+    }
+    try {
+      var response = await fetch(form.action, { method: "POST", body: params, credentials: "same-origin", signal: controller.signal });
+      if (response.status === 401) throw new Error("Authentication expired. Reload and sign in again.");
+      var result = parseResponse(await response.text());
+      if (!response.ok) result.ok = false;
+      return result;
+    } catch (error) {
+      if (error.name === "AbortError") throw new Error("No response within 60 seconds. The command may still finish; check command history before retrying.");
+      if (error.name === "TypeError") throw new Error("Connection lost. The command may still finish; check command history before retrying.");
+      throw error;
+    } finally {
+      clearTimeout(timeout); clearInterval(ticker);
+      commandBusy = false;
+      enabled.forEach(function (button) { button.disabled = false; });
+      document.body.classList.remove("command-busy");
+    }
+  }
+
+  document.addEventListener("submit", async function (ev) {
+    var form = ev.target;
+    if (!form.matches("[data-inline-command]") || !output) return;
+    ev.preventDefault();
+    if (form === browserForm) { browseFolder(form.elements.arg.value); return; }
+    var label = form.dataset.commandLabel || form.elements.verb.value;
+    try {
+      var result = await sendCommand(form);
+      showResponse(label, result);
+    } catch (error) {
+      showCommandError(error.message || "Connection failed. Check command history before retrying.");
+    }
+  });
+  var dismissOutput = document.getElementById("dismiss-output");
+  if (dismissOutput) dismissOutput.addEventListener("click", function () {
+    if (commandBusy) return;
+    output.classList.add("hidden");
+    var pickerSummary = document.querySelector(".tool-picker>summary");
+    var activeTab = document.querySelector(".tab.active");
+    (compact.matches ? pickerSummary : activeTab).focus();
+  });
+
+  function fileNote(message, error) {
+    var note = document.getElementById("browser-note");
+    if (note) { note.textContent = message; note.classList.toggle("error", !!error); }
+  }
+  function fileIcon(kind) {
+    return document.getElementById(kind + "-icon").content.firstElementChild.cloneNode(true);
+  }
+  function humanSize(value) {
+    var bytes = Number(value);
+    if (!Number.isFinite(bytes) || bytes < 0) return "—";
+    if (bytes < 1024) return bytes + " B";
+    var units = ["KB", "MB", "GB", "TB"];
+    var level = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)) - 1, 3);
+    return (bytes / Math.pow(1024, level + 1)).toLocaleString(undefined, { maximumFractionDigits: 1 }) + " " + units[level];
+  }
+  function drawBreadcrumbs(path) {
+    var crumbs = document.getElementById("browser-breadcrumbs");
+    crumbs.replaceChildren();
+    var parts = path.split("/").filter(Boolean);
+    var prefix = "";
+    ["/"].concat(parts).forEach(function (name, index) {
+      if (index > 0) prefix += "/" + name;
+      var button = document.createElement("button");
+      button.type = "button"; button.dataset.folder = prefix || "/"; button.textContent = name;
+      button.setAttribute("aria-label", "Open " + (prefix || "/"));
+      crumbs.appendChild(button);
+      if (index > 0 && index < parts.length) { var sep = document.createElement("span"); sep.textContent = "/"; sep.className = "muted"; sep.setAttribute("aria-hidden", "true"); crumbs.appendChild(sep); }
+    });
+  }
+  function filterFiles() {
+    var filter = document.getElementById("file-filter");
+    var rows = Array.from(document.querySelectorAll(".file-row"));
+    var query = filter.value.toLowerCase();
+    rows.forEach(function (row) { row.classList.toggle("hidden", row.dataset.filename.indexOf(query) === -1); });
+    document.getElementById("file-empty").classList.toggle("hidden", rows.some(function (row) { return !row.classList.contains("hidden"); }));
+    document.getElementById("file-empty").textContent = rows.length ? "No files match this filter." : "This folder is empty.";
+  }
+  async function browseFolder(path) {
+    if (!browserForm) return;
+    path = path.trim().replace(/\/+$/, "") || "/";
+    if (!path.startsWith("/") || /[\s\x00-\x1f]/.test(path)) {
+      fileNote("Use an absolute path without spaces. This server cannot list folder paths containing spaces; exact-path file downloads still work.", true); return;
+    }
+    if (commandBusy) { fileNote("Another command is running. Wait for its result, then browse again.", true); return; }
+    fileNote("Reading " + path + "…");
+    var list = document.getElementById("file-list");
+    list.setAttribute("aria-busy", "true");
+    try {
+      var result = await sendCommand(browserForm, { arg: path }, true);
+      if (!result.ok) { showResponse("Browse folder", result); throw new Error("Could not open " + path + ". See the device response. The previous listing is unchanged."); }
+      var entries = resultPayload(result.data);
+      if (!Array.isArray(entries)) throw new Error("The device did not return a directory listing. The previous listing is unchanged.");
+      var fragment = document.createDocumentFragment();
+      entries.forEach(function (file) {
+        if (!file || typeof file.path !== "string" || !file.path.startsWith("/") || typeof file.name !== "string") return;
+        var row = document.createElement("div"); row.className = "file-row"; row.dataset.filename = file.name.toLowerCase(); row.setAttribute("role", "listitem");
+        var name = document.createElement("div"); name.className = "file-name"; name.appendChild(fileIcon(file.dir === true ? "folder" : "file"));
+        if (file.dir === true) {
+          var folder = document.createElement("button"); folder.type = "button"; folder.textContent = file.name; folder.dataset.folder = file.path; folder.setAttribute("aria-label", "Open folder " + file.name); name.appendChild(folder);
+        } else {
+          var text = document.createElement("span"); text.textContent = file.name; name.appendChild(text);
+        }
+        row.appendChild(name);
+        var size = document.createElement("span"); size.className = "file-size"; size.textContent = file.dir === true ? "Folder" : humanSize(file.size); row.appendChild(size);
+        if (file.dir !== true) {
+          var link = document.createElement("a"); link.className = "btn small secondary"; link.textContent = "Download";
+          link.href = "/files/download?" + new URLSearchParams({ device_id: browserForm.dataset.deviceId, path: file.path });
+          link.setAttribute("aria-label", "Download " + file.name); row.appendChild(link);
+        }
+        fragment.appendChild(row);
+      });
+      list.replaceChildren(fragment);
+      currentFolder = path;
+      browserForm.elements.arg.value = path;
+      document.getElementById("file-filter").value = "";
+      drawBreadcrumbs(path);
+      document.getElementById("browser-up").disabled = path === "/";
+      document.getElementById("file-count").textContent = entries.length + " items";
+      var uploadDest = document.querySelector('#upload-form input[name="dest"]');
+      if (uploadDest && !uploadDest.value) { uploadDest.placeholder = "Blank = /sdcard/Download/<filename>"; }
+      filterFiles(); fileNote("Read " + entries.length + " items from " + path + ".");
+    } catch (error) { fileNote(error.message || "Unable to read folder. Try again when the device is online.", true); }
+    finally { list.removeAttribute("aria-busy"); }
+  }
+  document.addEventListener("click", function (ev) {
+    var folder = ev.target.closest("[data-folder]");
+    if (folder) browseFolder(folder.dataset.folder);
+  });
+  var up = document.getElementById("browser-up");
+  if (up) up.addEventListener("click", function () {
+    if (currentFolder) browseFolder(currentFolder.slice(0, currentFolder.lastIndexOf("/")) || "/");
+  });
+  var fileFilter = document.getElementById("file-filter");
+  if (fileFilter) fileFilter.addEventListener("input", filterFiles);
 
   // ---- Stream single-frame polling ---------------------------------------
   var streamImg = document.getElementById("stream-img");
@@ -433,6 +845,10 @@ JS = r"""
   if (uploadForm) {
     uploadForm.addEventListener("submit", function (ev) {
       ev.preventDefault();
+      if (uploadForm.dataset.uploading === "1") return;
+      uploadForm.dataset.uploading = "1";
+      var uploadSubmit = uploadForm.querySelector('button:not([type="button"])');
+      if (uploadSubmit) uploadSubmit.disabled = true;
       var formData = new FormData(uploadForm);
       var xhr = new XMLHttpRequest();
       var bar = document.getElementById("upload-progress");
@@ -440,17 +856,13 @@ JS = r"""
       var abortBtn = document.getElementById("upload-abort");
 
       function setNote(msg) { if (note) note.textContent = msg; }
-      function hideAbort() { if (abortBtn) abortBtn.classList.add("hidden"); }
-      function resetBar() { if (bar) bar.querySelector("div").style.width = "0%"; }
-      function responseError() {
-        var text = xhr.responseText || "";
-        try {
-          var doc = new DOMParser().parseFromString(text, "text/html");
-          text = (doc.body && doc.body.textContent) || text;
-        } catch (e) { /* fall back to the raw body */ }
-        text = text.replace(/\s+/g, " ").trim();
-        return text ? text.slice(0, 300) : "empty response body";
+      function hideAbort() {
+        if (abortBtn) abortBtn.classList.add("hidden");
+        uploadForm.dataset.uploading = "0";
+        if (uploadSubmit) uploadSubmit.disabled = false;
       }
+      function resetBar() { if (bar) bar.querySelector("div").style.width = "0%"; }
+
 
       xhr.open("POST", uploadForm.action, true);
       // Slightly above the server's bounded upload RPC wait (180s + slack).
@@ -459,19 +871,23 @@ JS = r"""
         if (e.lengthComputable && bar) {
           var pct = Math.round((e.loaded / e.total) * 100);
           bar.querySelector("div").style.width = pct + "%";
-          setNote("uploading " + pct + "%");
+          setNote(pct === 100 ? "Sent to console; waiting for device confirmation…" : "Sending to console: " + pct + "%");
         }
       };
       xhr.onload = function () {
         hideAbort();
-        if (xhr.status >= 200 && xhr.status < 300) {
+        var result;
+        try { result = parseResponse(xhr.responseText); }
+        catch (error) { resetBar(); setNote("Upload response could not be read: " + error.message); return; }
+        if (xhr.status >= 200 && xhr.status < 300 && result.ok) {
           if (bar) bar.querySelector("div").style.width = "100%";
-          setNote("upload complete");
-          setTimeout(function () { window.location.reload(); }, 800);
+          setNote("Upload complete. Device response is shown above.");
         } else {
           resetBar();
-          setNote("upload failed (HTTP " + xhr.status + "): " + responseError());
+          result.ok = false;
+          setNote("Upload failed. See the device response above.");
         }
+        showResponse("File upload", result);
       };
       xhr.onerror = function () {
         hideAbort();
@@ -493,7 +909,7 @@ JS = r"""
         abortBtn.onclick = function () {
           xhr.abort();
           var didInput = uploadForm.querySelector('input[name="device_id"]');
-          var body = new FormData();
+          var body = new URLSearchParams();
           body.append("csrf_token", token);
           body.append("device_id", didInput ? didInput.value : "");
           setNote("upload cancelled; requesting a device-side abort " +
@@ -517,6 +933,12 @@ JS = r"""
     });
   }
 
+  var requestedTool = location.hash.match(/^#tool-(files|screen|ui|media|system)$/);
+  if (requestedTool) {
+    var requestedTab = document.querySelector('[data-tab="' + requestedTool[1] + '"]');
+    if (requestedTab) requestedTab.click();
+  }
+
   // ---- Auto-refresh dashboard -------------------------------------------
   var refresh = document.getElementById("auto-refresh");
   if (refresh && refresh.checked) {
@@ -529,17 +951,8 @@ JS = r"""
 # HTML base template
 # ---------------------------------------------------------------------------
 def icon(name):
-    paths = {
-        "devices": '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
-        "settings": '<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="16" cy="17" r="3"/>',
-        "phone": '<rect x="6" y="2" width="12" height="20" rx="3"/><path d="M10 5h4M11 19h2"/>',
-        "pulse": '<path d="M2 12h5l3-8 4 16 3-8h5"/>',
-        "clock": '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
-        "search": '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
-        "arrow": '<path d="M5 12h14m-5-5 5 5-5 5"/>',
-        "screen": '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8m-4-4v4"/>',
-        "mark": '<path d="M5 19V9a7 7 0 0 1 14 0v10l-3-2-4 2-4-2-3 2Z"/><path d="M9 9h.01M15 9h.01"/>',
-    }
+    # Lucide icons (ISC); see ui_assets/Lucide-LICENSE.txt.
+    paths = {'devices': '<rect width="18" height="18" x="3" y="3" rx="2" />  <path d="M3 9h18" />  <path d="M9 21V9" />', 'settings': '<path d="M10 5H3" />  <path d="M12 19H3" />  <path d="M14 3v4" />  <path d="M16 17v4" />  <path d="M21 12h-9" />  <path d="M21 19h-5" />  <path d="M21 5h-7" />  <path d="M8 10v4" />  <path d="M8 12H3" />', 'phone': '<rect width="14" height="20" x="5" y="2" rx="2" ry="2" />  <path d="M12 18h.01" />', 'pulse': '<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2" />', 'clock': '<circle cx="12" cy="12" r="10" />  <path d="M12 6v6h4" />', 'search': '<path d="m21 21-4.34-4.34" />  <circle cx="11" cy="11" r="8" />', 'arrow': '<path d="M7 7h10v10" />  <path d="M7 17 17 7" />', 'screen': '<rect width="20" height="14" x="2" y="3" rx="2" />  <line x1="8" x2="16" y1="21" y2="21" />  <line x1="12" x2="12" y1="17" y2="21" />', 'mark': '<path d="M15 10v1" />  <path d="M7.528 20.472a1.6 1.6 0 012.277 0l1.057 1.056a1.6 1.6 0 002.276 0l1.057-1.056a1.6 1.6 0 012.277 0l1.114 1.114a1.4 1.4 0 002.414-1V10a8 8 0 00-16 0v10.586a1.4 1.4 0 002.414 1z" />  <path d="M9 10v1" />', 'folder': '<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />', 'file': '<path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z" />  <path d="M14 2v5a1 1 0 0 0 1 1h5" />', 'terminal': '<path d="M12 19h8" />  <path d="m4 17 6-6-6-6" />', 'chevron': '<path d="m6 9 6 6 6-6" />', 'upload': '<path d="M12 3v12" />  <path d="m17 8-5-5-5 5" />  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />', 'download': '<path d="M12 15V3" />  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />  <path d="m7 10 5 5 5-5" />', 'back': '<path d="m12 19-7-7 7-7" />  <path d="M19 12H5" />', 'refresh': '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />  <path d="M21 3v5h-5" />  <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />  <path d="M8 16H3v5" />'}
     return f'<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">{paths[name]}</svg>'
 
 
@@ -548,15 +961,17 @@ def render_page(title, body, csrf_token="", refresh=None, extra_head=""):
     if refresh:
         head += f'<meta http-equiv="refresh" content="{int(refresh)}">'
     head += extra_head
+    favicon = "data:image/svg+xml," + quote(icon("mark").replace('<svg ', '<svg xmlns="http://www.w3.org/2000/svg" ').replace('stroke="currentColor"', 'stroke="#ee898c"'), safe="")
     return f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#101213">
+<meta name="theme-color" content="#090b0e">
 <meta name="application-name" content="ghostctl">
 <meta name="csrf-token" content="{e(csrf_token)}">
 <title>{e(title)} — ghostctl</title>
+<link rel="icon" href="{e(favicon)}" type="image/svg+xml">
 <link rel="stylesheet" href="/static/app.css">
 {head}
 </head>
@@ -630,20 +1045,20 @@ def render_dashboard(devices, pending, csrf_token=""):
     </div></div>
     {_badge(online, approved)}
   </div>
-  <dl class="meta">
+  <details class="ui-disclosure device-more" data-responsive open><summary>Device details</summary><div><dl class="meta">
     <dt>Model</dt><dd>{e(model)}</dd>
     <dt>App</dt><dd>{e(app_ver)}</dd>
     <dt>Sidekick</dt><dd>{e(side_ver)}</dd>
     <dt>Battery</dt><dd>{e(bat)}</dd>
     <dt>IP</dt><dd>{e(ip)}</dd>
     <dt>Last seen</dt><dd>{e(last)}</dd>
-  </dl>
+  </dl></div></details>
   <div class="row device-actions">
     <a class="btn small" href="/device/{e(quote_safe(did))}">Open device {icon("arrow")}</a>
     <a class="btn small secondary" href="/stream/{e(quote_safe(did))}">{icon("screen")} Screen</a>
     {'' if approved else f'''<form method="post" action="/device/{e(quote_safe(did))}/approve" style="display:inline"><input type="hidden" name="csrf_token" value="{e(csrf_token)}"><button class="small">Approve</button></form>'''}
-    <form method="post" action="/device/{e(quote_safe(did))}/rename" style="display:inline"><input type="hidden" name="csrf_token" value="{e(csrf_token)}"><input type="text" name="name" placeholder="Device name" aria-label="New name for {e(name)}" size="12"><button class="small secondary">Rename</button></form>
-    {'' if not approved else f'''<form method="post" action="/device/{e(quote_safe(did))}/remove" style="display:inline"><input type="hidden" name="csrf_token" value="{e(csrf_token)}"><button class="small danger">Remove device</button></form>'''}
+    <details class="device-management"><summary>Manage device</summary><div>    <form method="post" action="/device/{e(quote_safe(did))}/rename" style="display:inline"><input type="hidden" name="csrf_token" value="{e(csrf_token)}"><input type="text" name="name" placeholder="Device name" aria-label="New name for {e(name)}" size="12"><button class="small secondary">Rename</button></form>
+    {'' if not approved else f'''<form method="post" action="/device/{e(quote_safe(did))}/remove" style="display:inline"><input type="hidden" name="csrf_token" value="{e(csrf_token)}"><button class="small danger">Remove device</button></form>'''}</div></details>
   </div>
 </div>""")
 
@@ -697,8 +1112,10 @@ def render_dashboard(devices, pending, csrf_token=""):
 <h2 class="section-title">Device directory <span class="count">{len(fleet)}</span></h2>
 <div class="search-row">
   <div class="search-field">{icon('search')}<input type="search" id="device-search" aria-label="Search devices" placeholder="Search devices, models, or IP addresses…" autocomplete="off"></div>
+  <details class="ui-disclosure filter-menu" data-responsive open><summary>Filters &amp; refresh</summary><div>
   <label class="small"><input type="checkbox" id="pending-only"> Pending only</label>
   <label class="small"><input type="checkbox" id="auto-refresh" checked> Auto-refresh</label>
+  </div></details>
 </div>
 {pending_section}
 <div class="grid">{''.join(cards) or empty}</div>
@@ -774,168 +1191,213 @@ BROADCAST_VERBS = {
 }
 
 
+# Presentation-only groupings; the command allowlists above remain authoritative.
+ACTION_SECTIONS = {
+    "Files": [("Advanced file tools", ["files tree", "files abort"])],
+    "Screen": [("Capture", ["screen shot", "screen record"]),
+               ("Live view", ["screen live", "screen stop"]),
+               ("Display power", ["screen off"])],
+    "UI": [("Inspect interface", ["ui dump", "ui find"]),
+           ("Touch gestures", ["tap", "longclick", "swipe"]),
+           ("Text & keys", ["type", "key"])],
+    "Media": [("Camera", ["cam snap", "cam live", "cam stop"]),
+              ("Microphone", ["mic record", "mic live", "mic stop"])],
+    "System": [("Device information", ["status", "device info", "sms recent", "loc once"]),
+               ("Display", ["wake", "brightness get", "brightness set", "hide", "unhide"]),
+               ("Audio", ["volume get", "volume set", "volume mute", "volume unmute"]),
+               ("Sidekick", ["sidekick status", "sidekick arm", "sidekick disarm", "sidekick install"]),
+               ("Session & recovery", ["arm", "disarm", "restart"]),
+               ("Terminal", ["shell"])],
+}
+
+ACTION_LABELS = {
+    "shell": "Run shell command", "files ls": "List folder", "files tree": "Directory tree", "files abort": "Abort stuck transfer",
+    "screen shot": "Take screenshot", "screen record": "Record screen",
+    "screen live": "Start live screen", "screen stop": "Stop live screen", "screen off": "Turn screen off",
+    "ui dump": "Read interface", "ui find": "Find element", "tap": "Tap", "longclick": "Long press",
+    "swipe": "Swipe", "type": "Type text", "key": "Send key",
+    "cam snap": "Take photo", "cam live": "Start camera", "cam stop": "Stop camera",
+    "mic record": "Record audio", "mic live": "Start microphone", "mic stop": "Stop microphone",
+    "status": "Check status", "device info": "Device information", "sms recent": "Read recent SMS",
+    "loc once": "Request location", "wake": "Wake screen", "brightness get": "Read brightness",
+    "brightness set": "Set brightness", "hide": "Hide launcher icon", "unhide": "Show launcher icon",
+    "volume get": "Read volume", "volume set": "Set volume", "volume mute": "Mute", "volume unmute": "Unmute",
+    "sidekick status": "Check sidekick", "sidekick arm": "Arm sidekick", "sidekick disarm": "Disarm sidekick",
+    "sidekick install": "Install sidekick", "arm": "Arm", "disarm": "Disarm", "restart": "Restart service",
+}
+
+
+def _result_payload(resp):
+    entry = resp.get("entry")
+    if isinstance(entry, dict):
+        return entry.get("result", entry)
+    return resp.get("result", resp)
+
+
+def _readable_value(value, depth=0):
+    """Render already-sanitized values as readable fields, text or records."""
+    if value is None:
+        return '<span class="muted">Not reported</span>'
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if depth >= 4:
+        return '<span class="muted">Expand technical details for nested data.</span>'
+    if isinstance(value, dict):
+        if not value:
+            return '<span class="muted">No additional data returned.</span>'
+        rows = []
+        for key, item in list(value.items())[:80]:
+            label = str(key).replace("_", " ").capitalize()
+            rendered = ('<span class="muted">Binary content omitted from this view.</span>'
+                        if "b64" in str(key).lower() or "base64" in str(key).lower()
+                        else _readable_value(item, depth + 1))
+            rows.append(f'<dt>{e(label)}</dt><dd>{rendered}</dd>')
+        return '<dl class="result-fields">' + ''.join(rows) + '</dl>'
+    if isinstance(value, list):
+        if not value:
+            return '<span class="muted">No items returned.</span>'
+        if all(isinstance(row, dict) for row in value):
+            keys = list(dict.fromkeys(key for row in value[:100] for key in row))[:6]
+            headers = ''.join(f'<th scope="col">{e(str(key).replace("_", " "))}</th>' for key in keys)
+            rows = ''.join('<tr>' + ''.join(f'<td>{_readable_value(row.get(key), depth + 1)}</td>' for key in keys) + '</tr>' for row in value[:100])
+            table = f'<div class="result-table"><table><thead><tr>{headers}</tr></thead><tbody>{rows}</tbody></table></div>'
+            if len(value) > 100:
+                table += f'<p class="small muted">Showing 100 of {len(value)} items. Technical details contain the full list.</p>'
+            return table
+        items = ''.join(f'<li>{_readable_value(item, depth + 1)}</li>' for item in value[:100])
+        note = '<p class="small muted">Showing the first 100 items.</p>' if len(value) > 100 else ''
+        return f'<ul class="result-list">{items}</ul>{note}'
+    if isinstance(value, str):
+        return f'<p class="result-text">{e(value) if value else "(empty)"}</p>'
+    return e(value)
+
+
+def _render_response_content(resp):
+    payload = truncate_json(mask_sensitive(_result_payload(resp)), 4000)
+    if isinstance(payload, dict) and payload.get("error"):
+        return f'<div class="result-error">{_readable_value(payload["error"])}</div>'
+    return _readable_value(payload)
+
+
 def render_device(device, history, csrf_token=""):
     did = device.get("device_id") or device.get("id") or ""
     name = device.get("name") or did
     online = bool(device.get("online"))
     approved = bool(device.get("approved"))
-    model = device.get("model") or "-"
-    app_ver = device.get("app_version") or device.get("version") or "-"
-    side_ver = device.get("sidekick_version") or "-"
-    bat = device.get("battery")
-    bat = f"{bat}%" if bat is not None else "-"
-    ip = device.get("ip") or "-"
-    last = fmt_age(device.get("last_seen"))
     qdid = quote_safe(did)
+    fields_by_verb = {verb: fields for actions in ACTION_GROUPS.values() for verb, fields in actions}
+    tab_icons = {"Files": "folder", "Screen": "screen", "UI": "devices", "Media": "pulse", "System": "terminal"}
+    tabs, panels = [], []
+    for index, (group_name, sections) in enumerate(ACTION_SECTIONS.items()):
+        gid = group_name.lower()
+        active = " active" if index == 0 else ""
+        tabs.append(f'<button type="button" class="tab{active}" data-tab-group="actions" data-tab="{gid}">{icon(tab_icons[group_name])}{e(group_name)}</button>')
+        section_html = []
+        for section_index, (section_name, verbs) in enumerate(sections):
+            forms = []
+            for verb in verbs:
+                label = ACTION_LABELS[verb]
+                fields = fields_by_verb[verb]
+                confirm = ""
+                if verb in ("restart", "screen stop", "cam stop", "mic stop"):
+                    message = (f"Restart {name}? This will disconnect the device." if verb == "restart"
+                               else f"Run {verb} on {name}?")
+                    confirm = f' data-confirm="{e(message)}"'
+                input_html = ''.join(f'<input type="text" aria-label="{e(label)} arguments" name="{e(fn)}" placeholder="{e(ph)}" value="{e(val)}" autocomplete="off" spellcheck="false">' for fn, ph, val in fields)
+                content = (f'<label for="args-{quote_safe(verb)}">{e(label)}</label><div class="row">' + input_html.replace('type="text"', f'type="text" id="args-{quote_safe(verb)}"') + f'<button type="submit" class="small secondary"{confirm}>Run</button></div>'
+                           if fields else f'<button type="submit" class="small secondary {"danger" if verb == "restart" else ""}"{confirm}>{e(label)}</button>')
+                forms.append(f'<form class="action-form {"field-form" if fields else ""}" method="post" action="/device/{qdid}/cmd" data-inline-command data-command-label="{e(label)}">{_csrf_input(csrf_token)}<input type="hidden" name="verb" value="{e(verb)}">{content}</form>')
+            responsive = ' data-responsive open' if section_index == 0 and group_name != "Files" else ''
+            section_html.append(f'<details class="ui-disclosure tool-section"{responsive}><summary>{e(section_name)}<span class="section-count">{len(verbs)} actions</span></summary><div class="command-list">{"".join(forms)}</div></details>')
+        extras = render_file_browser(did, csrf_token) if group_name == "Files" else ""
+        panels.append(f'<div class="tab-panel{active}" data-panel-group="actions" data-panel="{gid}">{extras}<div class="tool-sections">{"".join(section_html)}</div></div>')
 
-    tab_buttons = []
-    tab_panels = []
-    first = True
-    for group_name, actions in ACTION_GROUPS.items():
-        gid = group_name.lower().replace(" ", "-")
-        active = " active" if first else ""
-        tab_buttons.append(f'<button type="button" class="tab{active}" data-tab-group="actions" data-tab="{gid}">{e(group_name)}</button>')
-        panel_forms = []
-        for verb, fields in actions:
-            confirm = ""
-            if verb in ("restart", "screen stop", "cam stop", "mic stop", "revoke", "update"):
-                confirm = f' data-confirm="Run {e(verb)} on {e(name)}?"'
-            if verb == "restart":
-                confirm = f' data-confirm="Restart {e(name)}? This will disconnect the device."'
-            inputs = "".join(
-                f'<input type="text" aria-label="{e(verb)} arguments" name="{e(fn)}" placeholder="{e(ph)}" value="{e(val)}" size="30">'
-                for fn, ph, val in fields
-            )
-            panel_forms.append(
-                f'<form class="action-form" method="post" action="/device/{qdid}/cmd">'
-                f'{_csrf_input(csrf_token)}'
-                f'<input type="hidden" name="verb" value="{e(verb)}">'
-                f'<label>{e(verb)}</label>'
-                f'<div class="row">{inputs}<button{confirm} class="small">{e(verb)}</button></div>'
-                f'</form>'
-            )
-        tab_panels.append(f'<div class="tab-panel{active}" data-panel-group="actions" data-panel="{gid}"><div class="actions-grid">{"".join(panel_forms)}</div></div>')
-        first = False
-
-    # History table
     hrows = []
     for h in (history or [])[:60]:
         args = h.get("args")
-        if isinstance(args, str):
-            args_str = args
-        elif isinstance(args, list):
-            args_str = " ".join(str(a) for a in args)
-        else:
-            args_str = str(args) if args else ""
-        action_name = str(h.get("action", "")).lower()
-        if action_name in ("unlock", "pin", "setpin"):
+        args_str = args if isinstance(args, str) else " ".join(str(a) for a in args) if isinstance(args, list) else str(args or "")
+        if str(h.get("action", "")).lower() in ("unlock", "pin", "setpin"):
             args_str = "<masked>"
-        result = json_summary(h.get("result"), max_len=300)
-        hrows.append(
-            f'<tr><td>{e(fmt_age(h.get("ts")))}</td>'
-            f'<td>{e(h.get("action"))} <span class="small muted mono">{e(args_str[:120])}</span></td>'
-            f'<td>{e(h.get("status"))}</td>'
-            f'<td>{e(h.get("elapsed", "-"))}s</td>'
-            f'<td>{e(h.get("actor") or h.get("source") or "-")}</td>'
-            f'<td><details><summary>result</summary><pre>{e(result)}</pre></details></td></tr>'
-        )
-    history_html = "".join(hrows) or '<tr><td colspan="6" class="empty">No command history.</td></tr>'
-
-    body = f"""
-<div class="eyebrow">Device workspace</div>
-<h1>{e(name)}</h1>
-<p class="device-summary small">
-  {_badge(online, approved)}
-  <span class="mono muted">{e(did)}</span>
-  <span>model: {e(model)}</span>
-  <span>app: {e(app_ver)}</span>
-  <span>sidekick: {e(side_ver)}</span>
-  <span>battery: {e(bat)}</span>
-  <span>ip: {e(ip)}</span>
-  <span>last seen: {e(last)}</span>
-</p>
-<div class="card row">
-  <form method="post" action="/device/{qdid}/rename" class="row" style="margin:0">
-    {_csrf_input(csrf_token)}
-    <input type="text" name="name" aria-label="Device name" placeholder="device name" value="{e(device.get('name') or '')}" size="24">
-    <button class="small">Rename</button>
-  </form>
-  <form method="post" action="/device/{qdid}/approve" style="margin:0">
-    {_csrf_input(csrf_token)}
-    <button class="small">{'Re-approve' if approved else 'Approve'}</button>
-  </form>
-  <form method="post" action="/device/{qdid}/revoke" style="margin:0">
-    {_csrf_input(csrf_token)}
-    <button class="small danger" data-confirm="Revoke {e(name)}? The token will be rotated and the device must re-enroll.">Revoke</button>
-  </form>
-  <form method="post" action="/device/{qdid}/remove" style="margin:0">
-    {_csrf_input(csrf_token)}
-    <button class="small danger">Remove device</button>
-  </form>
-  <form method="post" action="/device/{qdid}/update" style="margin:0">
-    {_csrf_input(csrf_token)}
-    <button class="small" data-confirm="Trigger staged OTA update for {e(name)}?">Update</button>
-  </form>
-  <a class="btn small secondary" href="/stream/{qdid}">Screen</a>
-</div>
-
-<h2>Actions</h2>
-<div class="tabs">{"".join(tab_buttons)}</div>
-{"".join(tab_panels)}
-
-<h2>Command history</h2>
-<div class="card table-card">
-<table>
-<tr><th>When</th><th>Command</th><th>Status</th><th>Elapsed</th><th>Actor</th><th>Result</th></tr>
-{history_html}
-</table>
-</div>
-
-<div class="card">
-  <h3>File upload</h3>
-  <form id="upload-form" method="post" action="/files/upload" enctype="multipart/form-data">
-    {_csrf_input(csrf_token)}
-    <input type="hidden" name="device_id" value="{e(did)}">
-    <div class="row">
-      <input type="file" name="file" aria-label="Files to upload" multiple required>
-      <input type="text" name="dest" aria-label="Upload destination" placeholder="blank = /sdcard/Download/&lt;filename&gt;" size="30">
-      <button class="small">Upload</button>
-    </div>
-    <p class="small muted">Leave the destination blank to use
-      <span class="mono">/sdcard/Download/&lt;original filename&gt;</span>.
-      Multiple files go to one destination only if it is a directory.</p>
-    <div id="upload-progress" class="progress"><div></div></div>
-    <div id="upload-note" class="small muted"></div>
-    <button type="button" id="upload-abort" class="small danger hidden">Cancel</button>
-  </form>
-</div>
-
-<div class="card">
-  <h3>File download</h3>
-  <form method="get" action="/files/download" class="row">
-    <input type="hidden" name="device_id" value="{e(did)}">
-    <input type="text" name="path" aria-label="File path to download" placeholder="/sdcard/Download/file.bin" size="30" required>
-    <button class="small secondary">Download</button>
-  </form>
-  <p class="small muted">The file is relayed by the server as a real
-    download attachment, so binary content is never dumped as base64 in the
-    command history.</p>
-</div>
-"""
+        result = _readable_value(truncate_json(mask_sensitive(h.get("result")), 300))
+        hrows.append(f'<tr><td>{e(fmt_age(h.get("ts")))}</td><td>{e(h.get("action"))} <span class="small muted mono">{e(args_str[:120])}</span></td><td>{e(h.get("status"))}</td><td>{e(h.get("elapsed", "-"))}s</td><td>{e(h.get("actor") or h.get("source") or "-")}</td><td><details><summary>View result</summary>{result}</details></td></tr>')
+    history_html = ''.join(hrows) or '<tr><td colspan="6" class="empty">No command history.</td></tr>'
+    meta = []
+    for label, value in (
+        ("Model", device.get("model") or "Not reported"),
+        ("App", device.get("app_version") or device.get("version") or "Not reported"),
+        ("Sidekick", device.get("sidekick_version") or "Not reported"),
+        ("Battery", f'{device["battery"]}%' if device.get("battery") is not None else "Not reported"),
+        ("IP address", device.get("ip") or "Not reported"),
+        ("Last seen", fmt_age(device.get("last_seen"))),
+    ):
+        meta.append(f'<span><small>{e(label)}</small>{e(value)}</span>')
+    body = f'''
+<div class="device-context"><div><h1>{e(name)}</h1><div class="row small">{_badge(online, approved)}<span class="mono muted">{e(did)}</span></div></div><a class="btn secondary" href="/stream/{qdid}">{icon('screen')}Open screen</a></div>
+<details class="ui-disclosure" data-responsive open><summary>Connection details</summary><div><div class="device-summary small">{''.join(meta)}</div></div></details>
+<details class="ui-disclosure"><summary>Manage device<span class="small muted">Name, access &amp; updates</span></summary><div class="management-actions">
+<form method="post" action="/device/{qdid}/rename">{_csrf_input(csrf_token)}<input type="text" name="name" aria-label="Device name" value="{e(device.get('name') or '')}" placeholder="Device name…"><button class="small secondary">Rename</button></form>
+<form method="post" action="/device/{qdid}/approve">{_csrf_input(csrf_token)}<button class="small secondary">{'Re-approve' if approved else 'Approve'}</button></form>
+<form method="post" action="/device/{qdid}/revoke">{_csrf_input(csrf_token)}<button class="small danger" data-confirm="Revoke {e(name)}? The token will be rotated and the device must re-enroll.">Revoke</button></form>
+<form method="post" action="/device/{qdid}/remove">{_csrf_input(csrf_token)}<button class="small danger">Remove device</button></form>
+<form method="post" action="/device/{qdid}/update">{_csrf_input(csrf_token)}<button class="small secondary" data-confirm="Trigger staged OTA update for {e(name)}?">Update</button></form>
+</div></details>
+<div class="workspace-header"><h2>Device tools</h2><span>Choose a tool, then an action</span></div>
+<details class="ui-disclosure tool-picker" data-responsive open><summary>Tools<span data-active-tool>Files</span></summary><div class="tabs">{''.join(tabs)}</div></details>
+<section id="command-output" class="card execution-panel hidden" tabindex="-1" aria-label="Command output">
+<div class="execution-heading"><span>{icon('terminal')}Command output</span><button type="button" id="dismiss-output" aria-label="Dismiss command output">Dismiss</button></div>
+<div class="execution-body"><p id="command-state" class="execution-state" role="status" aria-live="polite"></p><div id="command-results"></div></div>
+</section>
+{''.join(panels)}
+<details class="ui-disclosure"><summary>Saved command history<span class="small muted">{len(history or [])} entries loaded</span></summary><div class="table-card"><table><thead><tr><th>When</th><th>Command</th><th>Status</th><th>Elapsed</th><th>Actor</th><th>Result</th></tr></thead><tbody>{history_html}</tbody></table></div></details>
+'''
     return render_page(f"Device {name}", body, csrf_token=csrf_token)
+
+
+def render_file_browser(did, csrf_token=""):
+    qdid = quote_safe(did)
+    return f'''
+<section class="card file-browser" aria-label="File explorer">
+<div class="browser-heading"><h3>{icon('folder')}File explorer</h3><span id="file-count" class="small muted">Not loaded</span></div>
+<form id="browser-form" class="browser-toolbar" method="post" action="/device/{qdid}/cmd" data-inline-command data-device-id="{e(did)}">
+{_csrf_input(csrf_token)}<input type="hidden" name="verb" value="files ls">
+<input type="text" name="arg" value="/sdcard/Download" aria-label="Folder path" autocomplete="off" spellcheck="false" required>
+<button type="submit" class="small">Browse folder</button><button type="button" id="browser-up" class="small secondary" disabled>{icon('back')}Up</button>
+</form>
+<div class="browser-shortcuts"><button type="button" data-folder="/sdcard/Download">Downloads</button><button type="button" data-folder="/sdcard">Shared storage</button><button type="button" data-folder="/sdcard/DCIM">Camera photos</button></div>
+<input id="file-filter" class="browser-filter" type="search" aria-label="Filter files in this folder" placeholder="Filter this folder…" autocomplete="off">
+<div id="browser-breadcrumbs" class="breadcrumb-path" aria-label="Current folder"><span class="small muted">Choose a folder to begin</span></div>
+<div id="file-list" class="file-list" role="list" aria-label="Files in current folder"></div><p id="file-empty" class="browser-note hidden"></p>
+<p id="browser-note" class="browser-note" role="status" aria-live="polite">Browse a folder to read its contents from the device.</p>
+<template id="folder-icon">{icon('folder')}</template><template id="file-icon">{icon('file')}</template>
+</section>
+<div class="transfer-grid">
+<details class="ui-disclosure"><summary>Upload files</summary><div>
+<form id="upload-form" method="post" action="/files/upload" enctype="multipart/form-data">
+{_csrf_input(csrf_token)}<input type="hidden" name="device_id" value="{e(did)}">
+<div class="row"><input type="file" name="file" aria-label="Files to upload" multiple required><input type="text" name="dest" aria-label="Upload destination" placeholder="Blank = /sdcard/Download/&lt;filename&gt;" autocomplete="off" spellcheck="false"><button class="small">Upload</button></div>
+<p class="small muted">Blank destination uses /sdcard/Download/&lt;original filename&gt;. For multiple files, use a directory ending in /.</p>
+<div id="upload-progress" class="progress"><div></div></div><div id="upload-note" class="small muted" role="status" aria-live="polite"></div><button type="button" id="upload-abort" class="small danger hidden">Cancel</button>
+</form></div></details>
+<details class="ui-disclosure"><summary>Download by path</summary><div>
+<form method="get" action="/files/download" class="row"><input type="hidden" name="device_id" value="{e(did)}"><input type="text" name="path" aria-label="File path to download" placeholder="/sdcard/Download/file.bin" required autocomplete="off" spellcheck="false"><button class="small secondary">Download</button></form>
+<p class="small muted">Downloads are delivered as attachments. Progress is shown by your browser.</p>
+</div></details>
+</div>
+'''
 
 
 def render_result(title, resp, back_url, csrf_token=""):
     ok = bool(resp.get("ok"))
-    summary = json_summary(resp)
-    body = f"""
+    summary = json_summary(resp, max_len=4000)
+    body = f'''
 <h1>{e(title)} — {'OK' if ok else 'FAILED'}</h1>
-<p><a href="{e(back_url)}">&larr; back</a></p>
-<div class="card">
-<pre>{e(summary)}</pre>
-</div>
-"""
+<p><a href="{e(back_url)}">&larr; Back</a></p>
+<div class="card"><p class="execution-state"><span class="badge {'ok' if ok else 'err'}">{'Completed' if ok else 'Failed'}</span>Device response</p>
+<section id="result-content" data-result-ok="{'1' if ok else '0'}">{_render_response_content(resp)}</section>
+<details><summary>Technical details</summary><pre id="result-data">{e(summary)}</pre></details></div>
+'''
     return render_page(title, body, csrf_token=csrf_token)
+
 
 
 def render_remove_result(device, resp, csrf_token=""):

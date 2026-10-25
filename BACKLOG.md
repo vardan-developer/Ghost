@@ -411,31 +411,44 @@ do not bypass Play Protect or treat these tests as a successful self-update.
 - Consider accessibility-based low-rate live frames only after still capture
   and current live projection are stable. Do not promise invisible live capture.
 
-## Console visual refresh — isolated branch, not deployed (2026-10-26)
+## Console UI checkpoint — isolated branch, not deployed (2026-10-26)
 
 - Branch: `codex/console-visuals`, created from committed `main` in the managed
-  `console-visuals` worktree. The concurrent backend work remains separate.
-- UI-only redesign in `server/console_ui.py`: angular charcoal surfaces,
-  restrained green accents, desktop sidebar, device overview counts, compact
-  pending approvals, consistent controls, and responsive phone bottom navigation.
-  Device, screen, settings, history, result and empty-state pages share the style.
-- Preserve the existing behavior JavaScript, command allowlists, form methods,
-  endpoints, submitted fields, CSRF tokens and confirmations. No `console.py`,
-  daemon, Android, authentication or backend-test edits.
-- Full PWA support is explicitly deferred by the user. This is a responsive
-  website, with no manifest/service worker or offline caching added.
-- Local preview uses synthetic devices only; no test account or enrollment on
-  Kali is needed. No physical device or deployed server was contacted.
-- Verification: 73 existing console tests and 2 overview tests pass; Python
-  compilation passes. Browser checks cover seven page/fixture variants at
-  320/390/768/1024/1440px with no page overflow, plus search, pending filtering,
-  keyboard action tabs and mobile navigation. Real phone Safari remains untested.
-- Known pre-existing issues are outside this visual-only change: device model
-  and sidekick fields may be absent; live-screen polling startup and upload
-  Cancel body-format issues need separate fixes. Downloads have no in-page
-  progress indicator. Do not infer those are fixed from the redesigned UI.
-- Not merged, pushed or deployed. Backend TLS/CSRF fixes remain the other
-  agent's responsibility; this visual review does not verify that hardening.
+  `console-visuals` worktree. UI development stops at the user's requested
+  integration checkpoint; merge the latest committed main into this branch.
+- Angular dark/red styling, IBM Plex Mono and Lucide icons are bundled into
+  existing UI assets, with source/license attribution in `server/ui_assets/`.
+  No external asset requests, new asset routes or CSP changes are required.
+- Phone layouts collapse tool selection, secondary device information and
+  subgroups. Related controls share subgroups; simple actions appear once.
+  Desktop uses a sidebar, while phones use bottom navigation.
+- Device commands (including System → Terminal shell commands) use the existing
+  URL-encoded endpoint/CSRF fields and display results on the same page as
+  readable fields, text or tables. Raw JSON is collapsed under Technical details.
+  Includes elapsed/pending, failure and duplicate-submit handling. Nothing is
+  retried automatically. Without JS, forms retain the normal result-page fallback.
+- The file explorer lists folders via existing `files ls`, with breadcrumbs,
+  folder/parent navigation, local filtering and per-file attachment downloads.
+  The duplicate List directory action is removed. Recursive tree/recovery tools,
+  upload and exact-path downloads stay in collapsed sections.
+- Upload results remain inline; cancellation now sends URL-encoded abort data.
+  Upload progress distinguishes bytes sent to the console from device completion.
+  Download progress belongs to the browser; no in-page progress/abort is claimed.
+- Full PWA support remains explicitly deferred. No manifest, service worker or
+  offline caching was added. Preview/test data is synthetic; no Kali account,
+  enrollment, physical-device access or deployment was needed.
+- Pre-integration verification: 83 console/UI Python tests and 42 browser layout
+  checks pass, along with inline success/error/CSRF/network states, confirmations,
+  duplicate-submit prevention, folder navigation/filter/download URLs, upload/
+  cancellation contracts, no-JS fallback, and font loading under the production
+  CSP. Browser tests are reproducible with `server/test_console_ui_browser.cjs`
+  using an installed Playwright + Chrome. Real-phone Safari remains untested.
+- Known limits: this server splits folder-list command arguments at spaces;
+  the explorer explains this and preserves the prior listing. Exact-path
+  downloads still accept spaces. Device model/sidekick persistence and live-screen
+  polling/start remain unresolved. No Android or backend logic was authored in
+  this UI change; backend updates come only from merging main.
+- Not pushed or deployed. Stop after integrating main and rerunning checks.
 
 ## Web console status (implemented and deployed)
 
