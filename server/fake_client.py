@@ -16,10 +16,14 @@ Usage: python3 fake_client.py <device_id> [ws://127.0.0.1:8443]
 import asyncio
 import hashlib
 import json
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 import websockets
+
+BASE = Path(__file__).resolve().parent
 
 
 def frame(header, payload):
@@ -35,10 +39,22 @@ def fake_jpeg(seq):
 async def main():
     device_id = sys.argv[1] if len(sys.argv) > 1 else "test-1"
     url = sys.argv[2] if len(sys.argv) > 2 else "ws://127.0.0.1:8443"
+    # enrollment key / stored token: env overrides, else local files next to
+    # the script (mirror the daemon's bootstrap for testing)
+    enroll_key = os.environ.get("GHOST_ENROLL_KEY",
+                                (BASE / "enroll.key").read_text().strip()
+                                if (BASE / "enroll.key").exists() else "")
+    token_file = BASE / f".fake-client-token-{device_id}"
+    token = token_file.read_text().strip() if token_file.exists() else None
     rx = None  # in-progress files-put receive: {"cmd_id","path","digest","written","chunks"}
     async with websockets.connect(url) as ws:
-        await ws.send(json.dumps({"type": "hello", "device_id": device_id,
-                                  "battery": 88, "ip": "127.0.0.1"}))
+        hello = {"type": "hello", "device_id": device_id,
+                 "battery": 88, "ip": "127.0.0.1"}
+        if enroll_key:
+            hello["enroll_key"] = enroll_key
+        if token:
+            hello["token"] = token
+        await ws.send(json.dumps(hello))
         async for raw in ws:
             if isinstance(raw, (bytes, bytearray)):  # framed binary
                 nl = raw.find(b"\n")
@@ -56,6 +72,13 @@ async def main():
                 continue
             msg = json.loads(raw)
             mtype = msg.get("type")
+            if mtype == "hello_ack":
+                print(f"hello_ack: {msg.get('status')}", file=sys.stderr)
+                if msg.get("token"):
+                    token_file.write_text(msg["token"])
+                if msg.get("status") == "denied":
+                    return
+                continue
             if mtype == "cmd":
                 action, cmd_args = msg["action"], msg.get("args", [])
                 if action == "shell":

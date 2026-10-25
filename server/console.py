@@ -199,15 +199,19 @@ def page_devices():
         dot = "on" if d.get("online") else "off"
         bat = d.get("battery")
         bat = f"{bat}%" if bat is not None else "-"
+        appr = ("<b style='color:#2a2'>approved</b>" if d.get("approved")
+                else "<i style='color:#c60'>pending</i>")
         rows.append(
             f"<tr><td><span class='dot {dot}'></span> {'on' if d.get('online') else 'off'}</td>"
             f"<td><a href='/device/{quote(did)}'>{e(did)}</a></td>"
+            f"<td>{appr}</td>"
             f"<td>{e(fmt_age(d.get('last_seen')))}</td><td>{e(bat)}</td>"
             f"<td>{e(d.get('ip') or '-')}</td>"
             f"<td><a href='/stream/{quote(did)}'>stream</a></td></tr>")
-    body = ("<h1>Devices</h1><table><tr><th></th><th>id</th><th>last seen</th>"
+    body = ("<h1>Devices</h1><table><tr><th></th><th>id</th><th>approval</th>"
+            "<th>last seen</th>"
             "<th>battery</th><th>ip</th><th></th></tr>"
-            + ("".join(rows) or "<tr><td colspan=6 class=muted>none yet</td></tr>")
+            + ("".join(rows) or "<tr><td colspan=7 class=muted>none yet</td></tr>")
             + "</table><p class=muted>auto-refresh 5s</p>")
     return render("Devices", body, refresh=5)
 
@@ -239,13 +243,20 @@ def page_device(did):
         f"{e(' '.join(h.get('args') or []))}</td><td>{e(h.get('status'))}</td>"
         f"<td><pre>{e(json.dumps(h.get('result'), ensure_ascii=False)[:400])}</pre></td></tr>"
         for h in hist[:50])
+    appr = ("<b style='color:#2a2'>approved</b>" if d.get("approved")
+            else "<i style='color:#c60'>pending</i>")
     body = (
         f"<h1>{e(did)}</h1>"
         f"<p>status: <span class='dot {'on' if d.get('online') else 'off'}'></span>"
         f" {'online' if d.get('online') else 'offline'} · "
+        f"approval: {appr} · "
         f"battery: {e(bat if bat is not None else '-')} · ip: {e(d.get('ip') or '-')} · "
         f"last seen: {e(fmt_age(d.get('last_seen')))} · "
         f"<a href='/stream/{quote(did)}'>stream</a></p>"
+        f"<form method='post' action='/device/{quote(did)}/approve'>"
+        f"<button>{'Re-approve' if d.get('approved') else 'Approve device'}</button></form> "
+        f"<form method='post' action='/device/{quote(did)}/revoke' class='danger'>"
+        f"<button onclick=\"return confirm('revoke %s? token is rotated')\">Revoke</button></form>"
         "<h2>Actions</h2>" + "<br>".join(forms) +
         "<h2>Command history</h2><table><tr><th>when</th><th>command</th>"
         f"<th>status</th><th>result</th></tr>{hrows or '<tr><td colspan=4 class=muted>none</td></tr>'}</table>")
@@ -373,6 +384,24 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         p = u.path.rstrip("/")
         qs = self._body_qs()
+        if p.startswith("/device/") and p.endswith("/approve"):
+            did = p[len("/device/"):-len("/approve")]
+            try:
+                resp = ghostctl.rpc({"op": "approve", "device_id": did})
+            except Exception as ex:
+                resp = {"ok": False, "error": str(ex)}
+            self._send(200, page_cmd_result(f"approve → {did}", resp,
+                                            f"/device/{quote(did)}"))
+            return
+        if p.startswith("/device/") and p.endswith("/revoke"):
+            did = p[len("/device/"):-len("/revoke")]
+            try:
+                resp = ghostctl.rpc({"op": "revoke", "device_id": did})
+            except Exception as ex:
+                resp = {"ok": False, "error": str(ex)}
+            self._send(200, page_cmd_result(f"revoke → {did}", resp,
+                                            f"/device/{quote(did)}"))
+            return
         verb = (qs.get("verb") or [""])[0].strip()
         arg = (qs.get("arg") or [""])[0].strip()
         if verb not in VERBS:

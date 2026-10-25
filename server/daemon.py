@@ -5,29 +5,48 @@ Device-facing WebSocket listener (default 0.0.0.0:8443) + admin JSON-RPC
 listener on localhost (default 127.0.0.1:8444, used by ghostctl.py CLI).
 
 Device protocol (JSON messages over WebSocket):
-  client -> server: {"type":"hello","device_id":..,"battery":..,"ip":..}
-                   {"type":"ping"}
-                   {"type":"info","battery":..,"ip":..}
-                   {"type":"result","cmd_id":..,"ok":true,"result":..}
-                   {"type":"stream_start","stream":..,"encoding":"mjpeg","meta":..}
-                   {"type":"stream_end","stream":..,"frames":N,"reason":..}
-                   binary: "<json header>\\n<payload>" (MediaBus framing —
-                   {"type":"frame","stream":..,"seq":..,"len":N} for live
-                   media; file_chunk/file_end for device->server file streams)
-  server -> client: {"type":"welcome"}
-                   {"type":"cmd","cmd_id":..,"action":..,"args":[..]}
-                   binary: file_chunk frames + text file_end (files put —
-                   the FileReceiver protocol, 64 KB chunks + sha256)
+  client -> server: {"type":"hello","device_id":..,"battery":..,"ip":..,
+                     "enroll_key":..,"token":..}   (last two optional)
+                    {"type":"ping"}
+                    {"type":"info","battery":..,"ip":..}
+                    {"type":"result","cmd_id":..,"ok":true,"result":..}
+                    {"type":"stream_start","stream":..,"encoding":"mjpeg","meta":..}
+                    {"type":"stream_end","stream":..,"frames":N,"reason":..}
+                    binary: "<json header>\\n<payload>" (MediaBus framing —
+                    {"type":"frame","stream":..,"seq":..,"len":N} for live
+                    media; file_chunk/file_end for device->server file streams)
+  server -> client: {"type":"hello_ack","status":"approved|pending|denied",
+                     "token":..}   (token echoed/issued on hello)
+                    {"type":"cmd","cmd_id":..,"action":..,"args":[..]}
+                    binary: file_chunk frames + text file_end (files put —
+                    the FileReceiver protocol, 64 KB chunks + sha256)
 
-State: server/state.json   (device registry)
-       server/history.json (command history)
-       server/apks/        (APK store for `update` pushes, gitignored)
+Device authentication: a hello carrying a valid "token" for an APPROVED
+device is trusted (status "approved", token echoed back). Otherwise a
+correct "enroll_key" enrolls/re-enrolls the device as PENDING with a
+fresh 32-hex token (status "pending") — pending devices may ping and
+send command results but receive no commands until `ghostctl approve`.
+Anything else is denied and the connection closed.
+
+Flood protection: at most MAX_PENDING pending devices are kept (new
+enrollments beyond that are denied + logged), at most MAX_PER_IP
+concurrent device connections per source IP (extras are dropped +
+logged), and all denials are logged to server/daemon.log.
+
+State: server/state.json   (device registry: approved + token per device)
+        server/history.json (command history)
+        server/apks/        (APK store for `update` pushes, gitignored)
+        server/enroll.key   (enrollment key, chmod 600, gitignored)
+        server/daemon.log    (rolling daemon log incl. denials)
 """
 import argparse
 import asyncio
 import base64
 import hashlib
+import hmac
 import json
+import os
+import secrets
 import sys
 import time
 import uuid
@@ -44,6 +63,14 @@ BASE = Path(__file__).resolve().parent
 STATE_FILE = BASE / "state.json"
 HISTORY_FILE = BASE / "history.json"
 APK_DIR = BASE / "apks"
+ENROLL_KEY_FILE = BASE / "enroll.key"
+LOG_FILE = BASE / "daemon.log"
+
+# Flood protection limits.
+MAX_PENDING = 50    # total pending (unapproved) devices kept in state
+MAX_PER_IP = 5      # concurrent device connections per source IP
+LOG_MAX_BYTES = 512 * 1024   # daemon.log is trimmed beyond this (rolling)
+
 
 # Every verb the client CommandHandler (client-main) or the PROJECT.md v1
 # command spec defines. Unknown actions are rejected with a clean error.
@@ -68,6 +95,41 @@ APK_DEST = {"sidekick": "/sdcard/Download/ghosta.apk",
 
 # Server->device file push chunk size (client FileReceiver protocol).
 PUSH_CHUNK = 64 * 1024
+
+
+def new_token():
+    """32-hex-char random device token."""
+    return secrets.token_hex(16)
+
+
+def load_enroll_key():
+    """Enrollment key: env GHOST_ENROLL_KEY first, then server/enroll.key
+    (created with a random 32-hex value + chmod 600 when missing)."""
+    env = os.environ.get("GHOST_ENROLL_KEY")
+    if env:
+        return env.strip()
+    try:
+        return ENROLL_KEY_FILE.read_text().strip()
+    except OSError:
+        pass
+    key = new_token()
+    ENROLL_KEY_FILE.write_text(key + "\n")
+    ENROLL_KEY_FILE.chmod(0o600)
+    return key
+
+
+def log(msg):
+    """Timestamped line to stdout + the rolling daemon.log (trimmed)."""
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}"
+    print(line, flush=True)
+    try:
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size > LOG_MAX_BYTES:
+            lines = LOG_FILE.read_text().splitlines()
+            LOG_FILE.write_text("\n".join(lines[-1000:]) + "\n")
+        with LOG_FILE.open("a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
 
 
 def is_jpeg(data):
@@ -199,6 +261,9 @@ class Daemon:
         self.conns = {}    # device_id -> websocket
         self.pending = {}  # cmd_id -> {"event","result","ok"}
         self.streams = StreamCache()
+        self.enroll_key = load_enroll_key()
+        self.ip_conns = {}  # source ip -> open device connection count
+        log("enrollment key loaded")
 
     # ---------- persistence ----------
     def persist_state(self):
@@ -220,11 +285,22 @@ class Daemon:
     def device_list(self):
         return self.devices
 
+    def pending_ids(self):
+        """device_ids currently in pending (not approved) state."""
+        return [d for d, rec in self.devices.items()
+                if isinstance(rec, dict) and not rec.get("approved")]
+
+    def approved(self, device_id):
+        rec = self.devices.get(device_id)
+        return bool(isinstance(rec, dict) and rec.get("approved"))
+
     # ---------- command router ----------
     async def dispatch(self, device_id, action, args, wait=10.0):
         """Send one command to one device, wait for its result."""
         if action not in ACTIONS:
             raise ValueError(f"unknown action {action!r}")
+        if not self.approved(device_id):
+            raise ValueError(f"device {device_id} pending approval")
         ws = self.conns.get(device_id)
         if ws is None:
             raise ConnectionError(f"device {device_id} is offline")
@@ -247,8 +323,9 @@ class Daemon:
         return entry
 
     async def broadcast(self, action, args, wait=10.0):
-        """Send a command to every online device; returns per-device entries."""
-        targets = [d for d, ws in self.conns.items() if ws is not None]
+        """Send a command to every online APPROVED device; per-device entries."""
+        targets = [d for d, ws in self.conns.items()
+                   if ws is not None and self.approved(d)]
         if not targets:
             return {}
         entries = await asyncio.gather(
@@ -264,6 +341,8 @@ class Daemon:
         """Stream a local file to the device: cmd `files put <dest>` followed
         by framed 64 KB file_chunk binaries + text file_end with sha256
         (matches client-main FileReceiver). Blocks until the device ACKs."""
+        if not self.approved(device_id):
+            raise ValueError(f"device {device_id} pending approval")
         ws = self.conns.get(device_id)
         if ws is None:
             raise ConnectionError(f"device {device_id} is offline")
@@ -288,8 +367,8 @@ class Daemon:
                       "len": len(payload), "total": total}
             await ws.send(json.dumps(header).encode() + b"\n" + payload)
         await ws.send(json.dumps({"type": "file_end", "path": dest,
-                                  "dest": dest, "bytes": total,
-                                  "chunks": chunks, "sha256": sha256}))
+                                   "dest": dest, "bytes": total,
+                                   "chunks": chunks, "sha256": sha256}))
         try:
             await asyncio.wait_for(rec["event"].wait(), timeout=wait)
             entry["status"] = "ok" if rec["ok"] else "error"
@@ -337,9 +416,47 @@ class Daemon:
         # device->server file streams (file_chunk/file_end from `files get`)
         # are handled by the operator via the result JSON; not stored here.
 
+    # ---------- hello / authentication ----------
+    async def handle_hello(self, ws, msg):
+        """Authenticate a hello message. Returns (device_id, ack) where ack
+        is the hello_ack dict; device_id None => deny + close."""
+        did = msg.get("device_id")
+        if not did:
+            return None, {"type": "hello_ack", "status": "denied"}
+        rec = self.devices.setdefault(did, {})
+        token = msg.get("token")
+        # 1. valid token for an approved device -> trusted
+        if (isinstance(token, str) and token and rec.get("approved")
+                and hmac.compare_digest(str(rec.get("token", "")), token)):
+            return did, {"type": "hello_ack", "status": "approved", "token": token}
+        # 2. valid enroll key -> create/reuse a pending entry, new token
+        enroll = msg.get("enroll_key")
+        if isinstance(enroll, str) and enroll and \
+                hmac.compare_digest(self.enroll_key, enroll):
+            was_pending = not rec.get("approved")
+            if not was_pending and len(self.pending_ids()) >= MAX_PENDING:
+                log(f"denied hello from {did} "
+                    f"({ws.remote_address[0]}): pending device limit "
+                    f"({MAX_PENDING}) reached")
+                return None, {"type": "hello_ack", "status": "denied"}
+            token = new_token()
+            return did, {"type": "hello_ack", "status": "pending", "token": token}
+        # 3. bad/missing credentials -> deny
+        why = "bad token" if token else ("bad enroll key" if enroll
+                                         else "no credentials")
+        log(f"denied hello from {did} ({ws.remote_address[0]}): {why}")
+        return None, {"type": "hello_ack", "status": "denied"}
+
     # ---------- websocket device handler ----------
     async def device_handler(self, ws):
         device_id = None
+        ip = (ws.remote_address or (None,))[0] or "?"
+        if self.ip_conns.get(ip, 0) >= MAX_PER_IP:
+            log(f"dropped device connection from {ip}: per-IP limit "
+                f"({MAX_PER_IP}) reached")
+            await ws.close()
+            return
+        self.ip_conns[ip] = self.ip_conns.get(ip, 0) + 1
         try:
             async for raw in ws:
                 if isinstance(raw, (bytes, bytearray)):
@@ -352,18 +469,29 @@ class Daemon:
                     continue
                 mtype = msg.get("type")
                 if mtype == "hello":
-                    device_id = msg.get("device_id")
-                    if not device_id:
-                        continue
+                    if device_id is not None:
+                        continue  # already authenticated on this connection
+                    did, ack = await self.handle_hello(ws, msg)
+                    await ws.send(json.dumps(ack))
+                    if did is None:
+                        await ws.close()
+                        return
+                    device_id = did
+                    approved = ack["status"] == "approved"
+                    token = ack["token"]
                     self.conns[device_id] = ws
                     self.touch(device_id, online=True,
                                extra={"battery": msg.get("battery"),
-                                      "ip": msg.get("ip") or ws.remote_address[0],
-                                      "version": msg.get("version")})
-                    await ws.send(json.dumps({"type": "welcome"}))
+                                      "ip": msg.get("ip") or ip,
+                                      "version": msg.get("version"),
+                                      "approved": approved,
+                                      "token": token})
+                    log(f"device {device_id} hello_ack "
+                        f"{ack['status']} from {ip}")
                 elif device_id is None:
                     continue
                 elif mtype == "ping":
+                    # heartbeats accepted from pending and approved devices
                     self.touch(device_id, online=None)
                     await ws.send(json.dumps({"type": "pong"}))
                 elif mtype == "info":
@@ -376,12 +504,16 @@ class Daemon:
                 elif mtype == "stream_end":
                     self.streams.drop(device_id, msg.get("stream"))
                 elif mtype == "result":
+                    # command results accepted from pending + approved devices
                     rec = self.pending.pop(msg.get("cmd_id"), None)
                     if rec:
                         rec["ok"] = bool(msg.get("ok", True))
                         rec["result"] = msg.get("result")
                         rec["event"].set()
         finally:
+            self.ip_conns[ip] = max(0, self.ip_conns.get(ip, 1) - 1)
+            if not self.ip_conns[ip]:
+                del self.ip_conns[ip]
             if device_id and self.conns.get(device_id) is ws:
                 del self.conns[device_id]
                 self.touch(device_id, online=False)
@@ -412,6 +544,25 @@ class Daemon:
         try:
             if op in ("list", "status", "devices"):
                 return {"ok": True, "devices": self.device_list()}
+            if op == "pending":
+                out = {d: self.devices[d] for d in self.pending_ids()}
+                return {"ok": True, "pending": out}
+            if op == "approve":
+                did = req["device_id"]
+                if did not in self.devices:
+                    return {"ok": False, "error": f"unknown device {did}"}
+                self.touch(did, online=None, extra={"approved": True})
+                log(f"device {did} approved via admin")
+                return {"ok": True, "device_id": did, "approved": True}
+            if op == "revoke":
+                did = req["device_id"]
+                if did not in self.devices:
+                    return {"ok": False, "error": f"unknown device {did}"}
+                token = new_token()  # rotate: a stolen token dies
+                self.touch(did, online=None,
+                           extra={"approved": False, "token": token})
+                log(f"device {did} revoked via admin (token rotated)")
+                return {"ok": True, "device_id": did, "approved": False}
             if op == "streams":
                 return {"ok": True, "streams": self.streams.listing()}
             if op == "stream_frame":
@@ -419,7 +570,7 @@ class Daemon:
                 if fr is None:
                     return {"ok": False,
                             "error": f"no cached jpeg frame for {req['device_id']}"
-                                    f"{'' if not req.get('stream') else ' ' + req['stream']}"}
+                                     f"{'' if not req.get('stream') else ' ' + req['stream']}"}
                 stream, encoding, ts, payload = fr
                 return {"ok": True, "stream": stream, "encoding": encoding,
                         "ts": ts, "frame_b64": base64.b64encode(payload).decode()}
@@ -445,8 +596,8 @@ class Daemon:
         # command response; the default 1 MiB rejected them.
         async with websockets.serve(self.device_handler, bind, port,
                                     max_size=32 * 1024 * 1024):
-            print(f"ghostctl daemon: devices ws://{bind}:{port}, "
-                  f"admin {admin_host}:{admin_port}", flush=True)
+            log(f"ghostctl daemon: devices ws://{bind}:{port}, "
+                f"admin {admin_host}:{admin_port}")
             async with admin:
                 await admin.serve_forever()
 

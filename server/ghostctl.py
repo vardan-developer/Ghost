@@ -142,6 +142,16 @@ def main():
     if ns.verb == "streams":
         emit(rpc({"op": "streams"}), ns.pretty)
         return
+    if ns.verb == "pending" and not ns.device and not ns.all:
+        emit(rpc({"op": "pending"}), ns.pretty)
+        return
+    if ns.verb in ("approve", "revoke"):
+        # device id via -d or as the first positional arg
+        did = ns.device or (ns.rest[0] if ns.rest else None)
+        if not did:
+            sys.exit(f"specify device id: ghostctl.py {ns.verb} <device_id>")
+        emit(rpc({"op": ns.verb, "device_id": did}), ns.pretty)
+        return
     if ns.verb in ("list", "status", "devices") and not ns.device and not ns.all:
         emit(rpc({"op": "list"}), ns.pretty)
         return
