@@ -282,7 +282,7 @@ main { background-image:linear-gradient(#53658205 1px,transparent 1px),linear-gr
 .device-context .row { gap:12px; }
 .device-context .mono { overflow-wrap:anywhere; }
 .device-summary { margin:0; border:0; padding:0; background:transparent; }
-.device-summary span { display:flex; flex-direction:column; gap:2px; color:var(--text); }
+.device-summary > span:not(.badge) { display:flex; flex-direction:column; gap:2px; color:var(--text); }
 .device-summary span small { color:var(--muted); }
 .management-actions { display:flex; flex-wrap:wrap; align-items:center; gap:12px; }
 .management-actions form { margin:0; }
@@ -588,7 +588,7 @@ JS = "var ghostConsoleFont = " + json.dumps(FONT_WOFF2) + ";\n" + r"""
     while (outputBody.children.length > 5) outputBody.lastElementChild.remove();
     if (outputState) outputState.textContent = label + (response.ok ? " completed." : " failed. See the response below.");
     output.focus({ preventScroll: true });
-    output.scrollIntoView({ block: "nearest", behavior: "instant" });
+    output.scrollIntoView({ block: "nearest", behavior: "auto" });
   }
 
   function showCommandError(message) {
@@ -615,7 +615,7 @@ JS = "var ghostConsoleFont = " + json.dumps(FONT_WOFF2) + ";\n" + r"""
       revealOutput();
       function updateElapsed() { outputState.textContent = verb + " running… " + Math.floor((Date.now() - started) / 1000) + "s"; }
       updateElapsed(); ticker = setInterval(updateElapsed, 1000);
-      output.scrollIntoView({ block: "nearest", behavior: "instant" });
+      output.scrollIntoView({ block: "nearest", behavior: "auto" });
     }
     try {
       var response = await fetch(form.action, { method: "POST", body: params, credentials: "same-origin", signal: controller.signal });
