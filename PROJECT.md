@@ -1,8 +1,26 @@
-# ghostctl — Android remote-control toolset
+# ghostctl — original design brief (historical)
 
-Stealthy Android client (2 apps) + server (daemon, web console, CLI) for full
-remote control of phones that run the client. Built for Android 8–16; primary
-test target: iQOO Z5 (FunTouch OS 13 / Android 13).
+> **This is the superseded design brief, not current status.** It is preserved
+> for protocol and product context. Read `README.md`, `AGENTS.md` and
+> `BACKLOG.md` for implemented behavior, verification and remaining work.
+>
+> Current implementation constraints:
+> - Owner-authorized device management only; no stealth, detection evasion or
+>   consent bypass.
+> - ghostd and ghosta stay separate. MediaProjection consent is requested per
+>   capture/session; it is not persistent.
+> - Camera/microphone and screen-sharing indicators are Android behavior and
+>   are not hidden.
+> - Unattended fleet OTA is not release-ready. Play Protect verification must
+>   not be bypassed.
+> - SMS send, contacts, call-log readers and WhatsApp export are not
+>   implemented. The current test target is an emulator plus the approved
+>   Pixel 10a, not the iQOO Z5 described below.
+
+The original brief described a stealthy Android client (2 apps) plus server
+(daemon, web console, CLI) for remote control of enrolled phones. The historical
+target was Android 8–16 on an iQOO Z5 (FunTouch OS 13 / Android 13); current
+work targets an emulator and the approved Pixel 10a.
 
 ## Requirements (agreed with owner)
 

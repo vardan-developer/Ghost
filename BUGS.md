@@ -2,7 +2,25 @@
 
 These are the preserved technical reports used to build `BACKLOG.md`.
 
-`BACKLOG.md` is authoritative for priority and current status. These reports are point-in-time reviews (2026-10-25): verify the current code before applying a finding, because some issues may already be fixed. They contain both confirmed defects and explicitly labelled hardening/speculation; do not treat every item as equally urgent.
+`BACKLOG.md` is authoritative for priority and current status. These reports are point-in-time reviews (2026-10-25): verify the current code before applying a finding, because some issues may already be fixed. They contain both confirmed defects and explicitly labelled hardening/speculation; do not treat every item as equally urgent. **Severity labels and "verified" markers below describe the audit date, not today.**
+
+Current reconciliation (2026-10-26):
+
+- **Fixed and tested:** file-transfer ownership, server/console/CLI audit items,
+  MediaProjection per-capture consent and latch/activity cleanup, endpoint
+  E2E portability, CLI aliases, update reconciliation/session scoping (source),
+  native console HTTPS, and the TLS hardening listed in the addendum.
+- **Verified on the emulator:** 29/29 E2E, unlock/consent, reboot recovery and
+  two-app removal. ghosta OTA installed after a timeout; ghostd self-update
+  remains blocked by Play Protect.
+- **Still open:** older camera/mic resource-ownership cleanup, localhost peer
+  UID/signature validation, device-transport WSS/TLS, CA-issued console
+  certificate, approved-device pagination/caps, endpoint cache/reconnect
+  hardening, console UI browser gaps and a real phone-sized UI review. SMS send,
+  contacts, call-log readers and WhatsApp export are unimplemented.
+
+Do not copy an audit paragraph into a release claim without checking the
+current source and `BACKLOG.md`.
 
 
 ---
@@ -1902,8 +1920,9 @@ unchanged. **Source fixes and unit tests are not device/deployment proof.**
   enrollment, connection ownership, pending cleanup, bounded history,
   authenticated/redacted admin operations, stream TTL/caps, broadcast results,
   CSRF/XSS/request limits, responsive console workflows, and file/device removal.
-- Local verification at this addendum: **249 server tests, 154 ghostd tests and
-  115 ghosta tests pass; both release builds pass.** Kali is updated and the
+- Local verification at this addendum: **254 server tests, 154 ghostd tests and
+  115 ghosta tests pass; both release builds pass.** Kali runs the previous
+  HTTPS build (the TLS hardening below still needs redeployment), and the
   emulator reports 29/29 plus unlock, consent, reboot and removal passes. The
   console serves native HTTPS; its current IP certificate is self-signed.
 
@@ -1916,9 +1935,19 @@ open; do not bypass Play Protect.
 Console HTTPS is implemented with TLS 1.2+ and deployed using a self-signed IP
 certificate. External TLS and an authenticated CSRF-protected POST passed, and
 plain HTTP on :9443 is rejected; replace the certificate with a CA-issued one
-before relying on browser trust. Still open or deployment-dependent: device-transport WSS/TLS and
+before relying on browser trust. The newer backend hardening is source-tested
+but not redeployed: worker-thread handshakes with a 10-second timeout and
+32-handshake cap (an idle TCP client cannot block accepts), startup validation
+before password generation/binding, a mode-600 private-key requirement,
+scheme-correct CSRF origins with `Origin: null` rejected, and HSTS plus a
+`Secure` CSRF cookie when native HTTPS is active. Tests include a real OpenSSL
+handshake, an idle-connection isolation check, plain-HTTP rejection on the TLS
+port, unsafe-key rejection, startup failure without a traceback, and HTTPS
+cookie/HSTS headers. Still open or deployment-dependent: redeploying the
+hardened backend and re-verifying externally, device-transport WSS/TLS and
 credential rotation, production file/directory permissions, approved-device
 pagination/cap hardening, the older camera/mic resource audit, endpoint
 cache/reconnect and localhost peer-authentication hardening, long-idle
-availability, and a real phone-sized console review. SMS send, contacts,
-call-log readers and WhatsApp export remain unimplemented.
+availability, and a real phone-sized console review (including the known UI
+polling/cancel/download gaps in `BACKLOG.md`). SMS send, contacts, call-log
+readers and WhatsApp export remain unimplemented.
