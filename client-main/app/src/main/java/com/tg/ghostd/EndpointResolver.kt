@@ -22,7 +22,8 @@ class EndpointResolver(
     private val contractAddress: String,
     private val selector: String,
     private val readCache: () -> String?,
-    private val writeCache: (String) -> Unit
+    private val writeCache: (String) -> Unit,
+    private val log: (String) -> Unit = {}
 ) {
     /** Fresh chain read with RPC fallback; falls back to the local cache. */
     fun resolve(): String? = fetchFresh() ?: readCache()
@@ -34,20 +35,20 @@ class EndpointResolver(
     fun fetchFresh(): String? {
         for (rpc in rpcUrls) {
             try {
-                val result = ethCall(rpc) ?: run {
-                    android.util.Log.w("ghostd", "RPC $rpc: empty/no-result response")
-                    return@run null
+                val result = ethCall(rpc)
+                if (result == null) {
+                    log("RPC $rpc: empty/no-result response")
+                    continue
                 }
-                if (result == null) continue
                 val ep = AbiCodec.decodeString(result)?.trim()
                 if (!ep.isNullOrEmpty()) {
                     val normalized = normalize(ep)
                     writeCache(normalized)
                     return normalized
                 }
-                android.util.Log.w("ghostd", "RPC $rpc: decode failed for $result")
+                log("RPC $rpc: decode failed for $result")
             } catch (e: Exception) {
-                android.util.Log.w("ghostd", "RPC $rpc failed: ${e.javaClass.simpleName}: ${e.message}")
+                log("RPC $rpc failed: ${e.javaClass.simpleName}: ${e.message}")
                 // try next RPC
             }
         }
@@ -104,7 +105,8 @@ class EndpointResolver(
             contractAddress = C2.CONTRACT_ADDRESS,
             selector = C2.ENDPOINT_SELECTOR,
             readCache = { Prefs.cachedEndpoint(ctx) },
-            writeCache = { Prefs.setCachedEndpoint(ctx, it) }
+            writeCache = { Prefs.setCachedEndpoint(ctx, it) },
+            log = { android.util.Log.w("ghostd", it) }
         )
     }
 }

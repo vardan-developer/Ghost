@@ -19,7 +19,7 @@ class EndpointResolverTest {
         body.append("%064x".format(bytes.size))          // length
         for (b in bytes) body.append("%02x".format(b))
         while (body.length % 64 != 0) body.append("00")  // pad to word
-        return "0x" + "5e280f11" + body
+        return "0x" + body
     }
 
     @Test fun decodesPlainString() {
@@ -38,7 +38,7 @@ class EndpointResolverTest {
         assertNull(AbiCodec.decodeString("0x"))
         assertNull(AbiCodec.decodeString("0xdeadbeef"))
         // wrong offset word
-        assertNull(AbiCodec.decodeString("0x5e280f11" + "%064x".format(64) + "%064x".format(1) + "41"))
+        assertNull(AbiCodec.decodeString("0x" + "%064x".format(64) + "%064x".format(1) + "41"))
     }
 
     // -------------------------------------------------------------- resolver
