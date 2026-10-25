@@ -139,12 +139,12 @@ class FgsLifecycleTest {
     @Test fun helloCarriesNumericVersionCode() {
         val msg = JSONObject(
             GhostService.buildHelloMessage(
-                "dev-1", "Pixel 10a", "15", 35, "0.4.0", 22L, 88, "sekret", "tok"
+                "dev-1", "Pixel 10a", "15", 35, "0.4.1", 23L, 88, "sekret", "tok"
             )
         )
         assertEquals("hello", msg.getString("type"))
-        assertEquals("0.4.0", msg.getString("app_version"))
-        assertEquals(22L, msg.getLong("version_code"))
+        assertEquals("0.4.1", msg.getString("app_version"))
+        assertEquals(23L, msg.getLong("version_code"))
         assertEquals("tok", msg.getString("token"))
     }
 

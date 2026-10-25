@@ -626,6 +626,22 @@ object CommandHandler {
             .put("error", "sidekick link: ${e.message}")
     }
 
+    /** Read-only operations may retry a transient window-tree failure once. */
+    private fun sidekickRead(cmd: JSONObject): JSONObject {
+        var result = sidekickSend(cmd)
+        if (transientSidekickError(result)) {
+            Thread.sleep(250)
+            result = sidekickSend(cmd)
+        }
+        return result
+    }
+
+    internal fun transientSidekickError(result: JSONObject): Boolean {
+        if (result.optBoolean("ok", false)) return false
+        val error = result.optString("error").lowercase()
+        return "no active window" in error || "root" in error || "window" in error
+    }
+
     /**
      * ui dump                          → {"cmd":"dump"} (full node tree)
      * ui find <text>                   → {"cmd":"find","text":...}
@@ -634,7 +650,7 @@ object CommandHandler {
     private fun uiCmd(args: JSONArray): JSONObject {
         val sub = args.optString(0, "")
         return when (sub) {
-            "dump" -> sidekickSend(JSONObject().put("cmd", "dump"))
+            "dump" -> sidekickRead(JSONObject().put("cmd", "dump"))
             "find" -> {
                 val o = opts(args, 1)
                 val cmd = JSONObject().put("cmd", "find")
@@ -644,9 +660,9 @@ object CommandHandler {
                     args.length() > 1 -> cmd.put("text", joinArgs(args, 1))
                     else -> throw Exception("ui find: expected --text <t> or --id <id>")
                 }
-                sidekickSend(cmd)
+                sidekickRead(cmd)
             }
-            "status" -> sidekickSend(JSONObject().put("cmd", "status"))
+            "status" -> sidekickRead(JSONObject().put("cmd", "status"))
             else -> throw Exception("ui: expected dump|find [--text|--id]")
         }
     }

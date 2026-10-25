@@ -179,7 +179,7 @@ moves; do not rely on old chat history for repository state.
 
 ## Testing
 
-- `client-main`: `gradle test` (152 JVM unit tests — protocol, transfer,
+- `client-main`: `gradle test` (153 JVM unit tests — protocol, transfer,
   lifecycle, consent, update and wake-session behavior).
 - `client-sidekick`: `gradle test` (115 unit tests — command router, tree,
   consent, link, unlock and removal state machines).

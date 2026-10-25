@@ -49,6 +49,16 @@ class CommandHandlerTest {
         assertEquals("plain text", envelope.getString("result"))
     }
 
+    @Test
+    fun `only transient sidekick read errors are retryable`() {
+        assertTrue(CommandHandler.transientSidekickError(
+            JSONObject().put("ok", false).put("error", "no active window")))
+        assertFalse(CommandHandler.transientSidekickError(
+            JSONObject().put("ok", false).put("error", "tap failed")))
+        assertFalse(CommandHandler.transientSidekickError(
+            JSONObject().put("ok", true)))
+    }
+
     // --------------------------------------------------------------- shell
 
     @Test(timeout = 10_000)

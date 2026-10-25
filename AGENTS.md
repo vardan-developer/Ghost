@@ -38,8 +38,8 @@ Android permissions, indicators and owner-controlled setup.
 
 ## Current status (2026-10-26)
 
-- Local full verification: 247 server unit tests + `py_compile`, 152 ghostd unit tests, and 115 ghosta unit tests pass. Release builds pass.
-- Emulator currently has the initial 0.3.9/0.1.9 build installed; basic command and accessibility screenshot path passed. Current source is ghostd 0.4.0 / ghosta 0.2.0; those builds are not yet installed or device-e2e tested.
+- Local full verification: 247 server unit tests + `py_compile`, 153 ghostd unit tests, and 115 ghosta unit tests pass. Release builds pass.
+- Emulator currently has the initial 0.3.9/0.1.9 build installed; basic command and accessibility screenshot path passed. Current source is ghostd 0.4.1 / ghosta 0.2.1; those builds are not yet installed or device-e2e tested.
 - Kali server: not yet updated or restarted. Pixel test device must remain untouched during current local/emulator work.
 - Next steps: review -> GitHub push -> Kali pull and restart -> install emulator -> full e2e.
 
