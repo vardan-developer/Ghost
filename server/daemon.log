@@ -1,0 +1,1 @@
+ghostctl daemon: devices ws://0.0.0.0:8443, admin 127.0.0.1:8444

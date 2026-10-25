@@ -11,6 +11,8 @@ additionally use the signing path.
 """
 
 import json
+import time
+import urllib.error
 import urllib.request
 
 # --- Keccak-256 (pure python) ------------------------------------------------
@@ -188,13 +190,25 @@ class RPC:
             self.url, data=payload,
             headers={"Content-Type": "application/json",
                      "User-Agent": "ghostctl/0.2"})
-        with urllib.request.urlopen(req, timeout=self.timeout) as r:
-            resp = json.loads(r.read())
-        if resp.get("error"):
-            raise RuntimeError(f"RPC error from {self.url}: {resp['error']}")
-        if "result" not in resp:
-            raise RuntimeError(f"RPC bad response from {self.url}: {resp}")
-        return resp["result"]
+        last_err = None
+        for attempt in range(5):  # public RPCs rate-limit blips (403/429/5xx)
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                    resp = json.loads(r.read())
+                if resp.get("error"):
+                    raise RuntimeError(f"RPC error from {self.url}: {resp['error']}")
+                if "result" not in resp:
+                    raise RuntimeError(f"RPC bad response from {self.url}: {resp}")
+                return resp["result"]
+            except urllib.error.HTTPError as e:
+                if e.code not in (403, 429, 500, 502, 503, 504):
+                    raise
+                last_err = e
+                time.sleep(1.5 * (attempt + 1))
+            except urllib.error.URLError as e:
+                last_err = e
+                time.sleep(1.5 * (attempt + 1))
+        raise RuntimeError(f"RPC {self.url} failed after retries: {last_err}")
 
 
 def send_tx(rpc: RPC, priv: bytes, to, data: bytes, chain_id: int,
