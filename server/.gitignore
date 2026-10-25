@@ -1,0 +1,4 @@
+# runtime artifacts
+state.json
+history.json
+*.tmp
