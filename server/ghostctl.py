@@ -56,7 +56,11 @@ PASS_THROUGH = {
 
 
 def rpc(req):
+    # admin socket timeout must exceed the command wait (screen shot with
+    # consent flow can take 60s+)
+    wait = float(req.get("wait", 10) or 10)
     with socket.create_connection((ADMIN_HOST, ADMIN_PORT), timeout=15) as s:
+        s.settimeout(max(30.0, wait + 15.0))
         s.sendall((json.dumps(req) + "\n").encode())
         buf = b""
         while not buf.endswith(b"\n"):

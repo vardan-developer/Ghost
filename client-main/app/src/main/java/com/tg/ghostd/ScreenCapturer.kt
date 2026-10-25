@@ -8,6 +8,8 @@ import android.hardware.display.VirtualDisplay
 import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
+import android.os.Handler
+import android.os.Looper
 import android.util.Base64
 import android.util.DisplayMetrics
 import android.view.WindowManager
@@ -37,6 +39,10 @@ import java.util.concurrent.TimeUnit
  * projection, so the stop path works even when a capture is stuck.
  */
 object ScreenCapturer {
+    /** ImageReader callbacks need a Looper; capture runs on plain worker
+     *  threads (no Looper) since 0.2.8 — always hand them the main looper.
+     *  Lazy: JVM unit tests touch this class without an Android runtime. */
+    private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
 
     @Volatile private var stopRequested = false
 
@@ -96,7 +102,7 @@ object ScreenCapturer {
                 r.acquireLatestImage()?.let { frames.offer(it) }
             } catch (_: Exception) {
             }
-        }, null)
+        }, mainHandler)
         var vd: VirtualDisplay? = null
         try {
             vd = projection.createVirtualDisplay(
@@ -181,7 +187,7 @@ object ScreenCapturer {
                 r.acquireLatestImage()?.let { frames.offer(it) }
             } catch (_: Exception) {
             }
-        }, null)
+        }, mainHandler)
         var vd: VirtualDisplay? = null
         var sent = 0L
         val last = longArrayOf(0L)
