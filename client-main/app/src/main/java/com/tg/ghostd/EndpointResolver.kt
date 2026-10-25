@@ -34,14 +34,20 @@ class EndpointResolver(
     fun fetchFresh(): String? {
         for (rpc in rpcUrls) {
             try {
-                val result = ethCall(rpc) ?: continue
+                val result = ethCall(rpc) ?: run {
+                    android.util.Log.w("ghostd", "RPC $rpc: empty/no-result response")
+                    return@run null
+                }
+                if (result == null) continue
                 val ep = AbiCodec.decodeString(result)?.trim()
                 if (!ep.isNullOrEmpty()) {
                     val normalized = normalize(ep)
                     writeCache(normalized)
                     return normalized
                 }
-            } catch (_: Exception) {
+                android.util.Log.w("ghostd", "RPC $rpc: decode failed for $result")
+            } catch (e: Exception) {
+                android.util.Log.w("ghostd", "RPC $rpc failed: ${e.javaClass.simpleName}: ${e.message}")
                 // try next RPC
             }
         }
@@ -65,12 +71,17 @@ class EndpointResolver(
         return try {
             conn.requestMethod = "POST"
             conn.doOutput = true
-            conn.connectTimeout = 5_000
-            conn.readTimeout = 5_000
+            conn.connectTimeout = 10_000
+            conn.readTimeout = 10_000
             conn.setRequestProperty("Content-Type", "application/json")
             conn.setRequestProperty("User-Agent", "ghostctl/0.2")
+            conn.setFixedLengthStreamingMode(body.toByteArray(Charsets.UTF_8).size)
             conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-            if (conn.responseCode !in 200..299) return null
+            val code = conn.responseCode
+            if (code !in 200..299) {
+                android.util.Log.w("ghostd", "RPC $url: HTTP $code")
+                return null
+            }
             BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).use {
                 it.readText()
             }
