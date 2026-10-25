@@ -404,16 +404,25 @@ class Daemon:
         self.persist_history()
         await ws.send(json.dumps({"type": "cmd", "cmd_id": cmd_id,
                                   "action": "files", "args": ["put", dest]}))
-        # the client now blocks inside FileReceiver.receive(dest) until the
-        # frames below complete the transfer
+        # the client awaits the prepared slot until the frames below complete
+        # the transfer
+        streaming_aborted = False
         for seq, off in enumerate(range(0, len(data), PUSH_CHUNK)):
+            if rec["event"].is_set():
+                # Device already returned a result/rejection (e.g. slot busy
+                # or aborted): stop streaming instead of blindly pushing the
+                # remaining chunks.
+                streaming_aborted = True
+                break
             payload = data[off:off + PUSH_CHUNK]
             header = {"type": "file_chunk", "seq": seq, "path": dest,
-                      "len": len(payload), "total": total}
+                      "cmd_id": cmd_id, "len": len(payload), "total": total}
             await ws.send(json.dumps(header).encode() + b"\n" + payload)
-        await ws.send(json.dumps({"type": "file_end", "path": dest,
-                                   "dest": dest, "bytes": total,
-                                   "chunks": chunks, "sha256": sha256}))
+        if not streaming_aborted:
+            await ws.send(json.dumps({"type": "file_end", "path": dest,
+                                       "dest": dest, "cmd_id": cmd_id,
+                                       "bytes": total, "chunks": chunks,
+                                       "sha256": sha256}))
         try:
             await asyncio.wait_for(rec["event"].wait(), timeout=wait)
             entry["status"] = "ok" if rec["ok"] else "error"
@@ -445,7 +454,7 @@ class Daemon:
         if target == "sidekick":
             return await self.dispatch(device_id, "sidekick",
                                       ["install", dest], wait=120.0)
-        return await self.dispatch(device_id, "update", ["self"], wait=120.0)
+        return await self.dispatch(device_id, "update", ["self", dest], wait=120.0)
 
     # ---------- stream relay ----------
     def on_device_binary(self, device_id, raw):

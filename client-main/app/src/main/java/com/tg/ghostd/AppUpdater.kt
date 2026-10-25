@@ -321,7 +321,11 @@ object AppUpdater {
      */
     private fun resolveApk(apkPath: String?, defaultPath: String): String {
         if (!apkPath.isNullOrBlank()) return apkPath
-        FileReceiver.receive(defaultPath)
-        return defaultPath
+        // The daemon pushes first and then passes the destination explicitly.
+        // Accept an already-pushed default for direct/manual commands, but do
+        // NOT open a second receive here: that used to wait for a nonexistent
+        // second upload after the daemon's push had already completed.
+        if (File(defaultPath).isFile) return defaultPath
+        throw Exception("update: APK not found at $defaultPath; push it first")
     }
 }

@@ -36,6 +36,13 @@
     <!-- special -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
+    <!-- Android 11+ package visibility: version/installer checks for the
+         bundled accessibility sidekick. Without this, device info reports
+         sidekick_version=null even while the service is running. -->
+    <queries>
+        <package android:name="com.tg.ghosta" />
+    </queries>
+
     <application
         android:allowBackup="true"
         android:icon="@drawable/ic_launcher"

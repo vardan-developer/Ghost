@@ -14,6 +14,7 @@ class CommandRouterTest {
         }
 
         override fun dump() = rec("dump")
+        override fun screenshot(format: String, quality: Int) = rec("screenshot:$format:$quality")
         override fun find(text: String?, id: String?) = rec("find:$text:$id")
         override fun tap(x: Int?, y: Int?, id: String?) = rec("tap:$x:$y:$id")
         override fun longClick(x: Int?, y: Int?, id: String?) = rec("long:$x:$y:$id")

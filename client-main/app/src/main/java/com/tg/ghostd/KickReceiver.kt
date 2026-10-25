@@ -16,6 +16,9 @@ class KickReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action == KICK_ACTION && Prefs.setupDone(context)) {
+            // A kick means "state is bad": drop any half-received file
+            // transfer too, otherwise it blocks every later push.
+            FileReceiver.abortAll("kick")
             try {
                 context.startForegroundService(
                     Intent(context, GhostService::class.java)

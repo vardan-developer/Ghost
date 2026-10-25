@@ -10,6 +10,12 @@ interface UiDriver {
     /** Full accessibility node tree as nested JSON map. */
     fun dump(): Map<String, Any?>
 
+    /**
+     * Silent screenshot through the accessibility capability (API 30+):
+     * NO MediaProjection consent sheet and NO screen-sharing indicator.
+     * [format] is "png" or "jpeg"; returns width/height + base64 payload.
+     */
+    fun screenshot(format: String, quality: Int): Map<String, Any?>
     /** Substring search on text/desc (text=...) or view resource id (id=...). */
     fun find(text: String?, id: String?): Map<String, Any?>
 
@@ -80,6 +86,9 @@ object CommandRouter {
             "ping" -> mapOf("ok" to true, "pong" to true)
             "status" -> d.status()
             "dump", "ui" -> d.dump()
+            "screenshot", "shot" -> d.screenshot(
+                str(msg, "format") ?: "png", int(msg, "quality") ?: 90
+            )
             "find" -> d.find(str(msg, "text"), str(msg, "id"))
             "tap" -> d.tap(int(msg, "x"), int(msg, "y"), str(msg, "id"))
             "longclick", "long" -> d.longClick(int(msg, "x"), int(msg, "y"), str(msg, "id"))

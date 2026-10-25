@@ -83,19 +83,25 @@ want remote access to it. All admin surfaces are localhost-bound by default.
 ### CLI (`server/ghostctl.py`)
 
 ```text
-list | pending | approve <id> | revoke <id> | config [set k v]
+list | pending | approve <id> | revoke <id> | rename <id> <name>
+config [set k v]
 -d <id> shell "cmd"                       run a shell command
--d <id> files ls|tree|get|put ...        file browser + transfer
+-d <id> files ls|tree|get|put|abort ...   file browser + transfer
 -d <id> screen shot|live|record|stop|off screen capture (MJPEG live)
 -d <id> cam snap|live|stop               camera
 -d <id> mic record|live|stop             microphone
+-d <id> sms recent [N] | loc once        messages / current location
+-d <id> device info | status             device and agent health
 -d <id> brightness|volume|wake          device controls
 -d <id> ui dump|find                     accessibility tree (JSON)
 -d <id> tap|longclick|type|key|swipe     UI automation (node-id or x,y)
 -d <id> unlock <pin>                      keyguard PIN entry
+-d <id> unlock --forget                   forget the stored keyguard PIN
+-d <id> hide | unhide                     launcher icon visibility
+-d <id> restart                           restart the device agent
 -d <id> arm|disarm                        sidekick dialog auto-confirmation
 -d <id> sidekick status|arm|install      helper app management
--d <id> update self|sidekick              silent OTA updates (hash-verified)
+-d <id> update self|sidekick              OTA updates (hash-verified)
 --all <verb> ...                          broadcast to all approved devices
 ```
 
@@ -137,6 +143,13 @@ JSON over WebSocket (device port 8443):
   (live streams)
 
 Full command spec: `PROJECT.md`.
+
+## Development handoff
+
+Agents and contributors should read **`AGENTS.md`** for architecture, build
+commands and authorized-use scope, then **`BACKLOG.md`** for current bugs,
+verification status and prioritized tasks. Those two files are updated as work
+moves; do not rely on old chat history for repository state.
 
 ## Reliability design
 

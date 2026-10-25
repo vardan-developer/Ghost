@@ -97,6 +97,7 @@ class GhostService : Service() {
         SidekickLink.stopAutoArm()
         SidekickLink.close()
         ProjectionHub.stop()
+        FileReceiver.abortAll("service destroyed")
         super.onDestroy()
     }
 
@@ -236,6 +237,10 @@ class GhostService : Service() {
             stopHeartbeat()
         } finally {
             forceLatch = null
+            // A dead socket can never deliver the remaining chunks/file_end.
+            // Only clear transfers owned by THIS socket, so a replacement
+            // connection's in-flight push is never killed by this teardown.
+            FileReceiver.abortOwner(ws, "connection ended")
             // best-effort teardown of a possibly half-open socket; the runLoop
             // is awake now regardless (watchdog counts the latch down itself)
             try {

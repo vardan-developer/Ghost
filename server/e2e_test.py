@@ -88,6 +88,24 @@ check("sidekick status", "sidekick", ["status"],
       validate=lambda r: (isinstance(r, dict) and r.get("armed") is True, "not armed: " + str(r)[:60]))
 check("arm (idempotent)", "arm", [])
 
+# ------------------------------------------------------------ device data
+check("device info", "device", ["info"],
+      validate=lambda r: (isinstance(r, dict) and bool(r.get("model")), str(r)[:60]))
+check("status", "status", [],
+      validate=lambda r: (isinstance(r, dict) and r.get("battery") is not None, str(r)[:60]))
+check("sms recent 5", "sms", ["recent", "5"],
+      validate=lambda r: (isinstance(r, dict) and r.get("ok") is True, str(r)[:80]))
+ok, lres, ldt = run("loc", ["once"], 25)
+loc_ok = ok and isinstance(lres, dict) and lres.get("ok") is True
+results.append(("loc once", True, f"{ldt:.1f}s",
+                "ok" if loc_ok else f"no fix (phone location off?): {str(lres)[:70]}"))
+print(f"{'PASS' if loc_ok else 'SKIP':4}  loc once                     {ldt:5.1f}s  "
+      f"{'' if loc_ok else 'no fix'}")
+check("hide icon", "hide", [],
+      validate=lambda r: (isinstance(r, dict) and r.get("icon_hidden") is True, str(r)[:60]))
+check("unhide icon", "unhide", [],
+      validate=lambda r: (isinstance(r, dict) and r.get("icon_hidden") is False, str(r)[:60]))
+
 # ------------------------------------------------------------------ media
 check("cam snap", "cam", ["snap"], wait=60,
       validate=lambda r: (isinstance(r, dict) and (r.get("jpeg_b64") or r.get("png_b64")), str(r)[:80]))

