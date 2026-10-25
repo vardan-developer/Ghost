@@ -7,7 +7,8 @@ Core daemon + CLI for the ghostctl Android remote-control toolset (see ../PROJEC
   device registry (`state.json`), command router + history (`history.json`),
   admin JSON-RPC on `127.0.0.1:8444` (CLI transport), per-device live-stream
   frame cache (`StreamCache`), server→device file push (`files put` framing)
-  and the `update self|sidekick` APK push flow.
+  and the `update self|sidekick` APK push flow. Admin authentication uses
+  `GHOSTCTL_ADMIN_TOKEN`/`admin.key`; tokens are redacted in logs and outputs.
 - `ghostctl.py` — CLI (symlink-friendly, e.g. `ln -s .../ghostctl.py ~/.local/bin/ghostctl`).
 - `console.py` — web console (see below).
 - `fake_client.py` — mock Android client for testing (echoes verbs, receives
@@ -28,8 +29,9 @@ python3 ghostctl.py streams                                    # live stream fra
 python3 ghostctl.py -d test-1 shell "echo hi"               # per-device command
 python3 ghostctl.py -d test-1 files ls /sdcard
 python3 ghostctl.py -d test-1 files tree /sdcard --depth 3
-python3 ghostctl.py -d test-1 files get /sdcard/x.jpg
-python3 ghostctl.py -d test-1 files put /sdcard/Download/x.bin   # server pushes (needs a push op)
+python3 ghostctl.py -d test-1 files get /sdcard/x.jpg          # returns base64 content
+python3 ghostctl.py -d test-1 files put <dest> <src>           # server pushes to dest
+python3 ghostctl.py remove test-1                              # uninstall both apps
 python3 ghostctl.py -d test-1 sms recent 20
 python3 ghostctl.py -d test-1 screen shot
 python3 ghostctl.py -d test-1 screen live --fps 5 --quality 60
@@ -51,13 +53,11 @@ python3 ghostctl.py -d test-1 loc once
 python3 ghostctl.py -d test-1 device info
 python3 ghostctl.py -d test-1 hide
 python3 ghostctl.py -d test-1 status
-python3 ghostctl.py -d test-1 ping
 python3 ghostctl.py apks list
 python3 ghostctl.py apks add ghosta /path/to/ghosta.apk
 python3 ghostctl.py -d test-1 update sidekick               # push APK + sidekick install
 python3 ghostctl.py -d test-1 update self --apk /path/to/ghostd.apk
-python3 ghostctl.py -d test-1 destroy
-python3 ghostctl.py --all update                            # broadcast
+python3 ghostctl.py --all update                            # rejected
 python3 ghostctl.py --pretty list                           # human-readable
 ```
 Unknown verbs are rejected with a clean error (daemon whitelist `ACTIONS`).
@@ -87,34 +87,31 @@ python3 console.py                    # http://127.0.0.1:9443 (localhost only)
 GHOST_CONSOLE_PASS=sekrit python3 console.py --port 9443
 ```
 Stdlib-only (http.server), server-rendered HTML, no CDNs — works offline.
-Talks to the daemon by importing `ghostctl` and reusing its `rpc()` (admin
-port, env `GHOSTCTL_ADMIN_HOST/PORT`). Command history is read read-only
-from `history.json`.
+Talks to the daemon by importing `ghostctl` and reusing its authenticated
+`rpc()` (admin port, env `GHOSTCTL_ADMIN_HOST/PORT`). Bounded, redacted command
+history is fetched through the daemon's `history` admin operation.
 
-- Auth: HTTP Basic on every request. Password from `GHOST_CONSOLE_PASS`;
-  if unset, a random one is generated and printed at startup
-  (username is ignored — `curl -u ghost:<pass>`).
-- Binding: `127.0.0.1` by default. `--host 0.0.0.0` for remote access, but
-  only open the firewall when needed (`sudo ufw allow 9443/tcp`); never
-  preemptively.
+- Auth: HTTP Basic on every request. Password comes from `GHOST_CONSOLE_PASS`;
+  for localhost-only use, an unset password is generated into mode-600
+  `console.pass` rather than printed (username is ignored —
+  `curl -u ghost:<pass>`). CSRF protection covers state-changing routes.
+  Tokens, PINs and passwords are redacted from history and logs.
+- Binding: `127.0.0.1` by default. Non-loopback HTTP is refused unless
+  `GHOST_CONSOLE_ALLOW_HTTP=1` is explicitly set; use TLS for remote access.
+  Only open the firewall when needed (`sudo ufw allow 9443/tcp`).
 - Pages:
-  - `/` device list — online dot, last_seen, battery, IP; auto-refresh 5 s.
-  - `/device/<id>` — status + action forms 1:1 with ghostctl verbs (shell,
-    ui dump/find, tap/longclick/type/key/swipe/unlock, arm/disarm,
-    sidekick status/arm/disarm/ping/install, files ls/tree/get/put,
-    screen shot/record/live/stop/off, cam snap/live/stop, mic
-    record/live/stop, brightness get/set, volume get/set/mute/unmute,
-    wake, sms recent, loc once, device info, update, hide/unhide,
-    status, ping, destroy w/ confirm) + per-device command history.
-  - `/broadcast` — pick a verb, run it with `--all` semantics.
-  - `/stream/<id>` — MJPEG display from the daemon's stream cache
-    (`/stream/<id>/feed.mjpg`, single-frame poll at `/stream/<id>/feed`);
-    waiting state until a stream is active.
-- POST `/device/<id>/cmd` (form fields `verb`, optional `arg`) is the form
-  endpoint; results render as a JSON page. Verbs map exactly to ghostctl.py
-  (`shell` sends one string arg like the CLI does). The full APK-push update
-  flow is CLI-only (`ghostctl.py -d <id> update ...`); the console `update`
-  button sends the plain client verb.
+  - `/` dashboard with device cards, search/filter and pending approvals.
+  - `/device/<id>` grouped Files, Screen, UI, Media and System actions plus
+    recent history. PIN entry is intentionally CLI-only. Restart/update/revoke
+    use confirmations; the explicit Remove Device action needs no second
+    confirmation and uninstalls both apps without deleting personal data.
+  - `/broadcast` — restricted to safe read/stop verbs.
+  - `/stream/<id>` — live view with explicit start/stop and frame-age health;
+    feed URLs include an unguessable stream token.
+  - `/settings` — flood-cap editing.
+  - File upload/download with progress/error reporting and abort support.
+- POST `/device/<id>/cmd` runs a device action and renders a bounded result.
+  The console `update` action uses the daemon's complete APK-push flow.
 
 ## Test
 ```sh
@@ -126,7 +123,7 @@ python3 ghostctl.py -d test-1 tap 100 200       # routed verb
 python3 ghostctl.py -d test-1 screen live       # fake_client streams framed JPEGs
 python3 ghostctl.py streams                     # cached frames
 GHOST_CONSOLE_PASS=pw python3 console.py &   # then browse http://127.0.0.1:9443
-curl -u ghost:pw -o f.jpg http://127.0.0.1:9443/stream/test-1/feed   # image/jpeg
+# Copy the tokenized feed URL from the console's live-view page to fetch JPEGs.
 python3 ghostctl.py apks add ghosta dummy.apk
 python3 ghostctl.py -d test-1 update sidekick   # push + install (sha256-checked)
 ```

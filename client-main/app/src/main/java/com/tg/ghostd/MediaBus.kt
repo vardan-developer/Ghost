@@ -40,12 +40,23 @@ object MediaBus {
     @Volatile private var wakeLock: PowerManager.WakeLock? = null
     private val lock = Any()
 
+    /** Stream generation: bumped by every successful [begin]. */
+    private var generation = 0L
+
+    /** Screen-awake session owned by the current stream (see ScreenAwakeController). */
+    @Volatile private var streamAwakeToken = 0L
+    @Volatile private var streamAwakeSource: String? = null
+
     /**
      * Claim the single capture slot; throws if another source is active.
      * ctx is nullable so the busy-lock logic is unit-testable on the JVM
      * (no PowerManager -> no wake lock; harmless on-device).
+     *
+     * Also opens a screen-awake session so the display does not turn off in
+     * the middle of a stream (the CPU-only partial lock is kept separately).
+     * Returns the generation token for stale-safe [end]/[forceEnd] calls.
      */
-    fun begin(source: String, ctx: Context?, socket: WebSocket?) {
+    fun begin(source: String, ctx: Context?, socket: WebSocket?): Long {
         synchronized(lock) {
             activeSource?.let { active ->
                 throw Exception("busy: $active capture already active; stop it first")
@@ -56,20 +67,29 @@ object MediaBus {
             val pm = ctx?.getSystemService(PowerManager::class.java)
             wakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ghostd:media")
                 ?.also { it.acquire(STREAM_WAKE_TIMEOUT_MS) }
+            generation++
+            endStreamAwake(null)   // never leak a session from a dead predecessor
+            streamAwakeToken = ScreenAwakeController.begin(ctx)
+            streamAwakeSource = source
+            return generation
         }
     }
 
-    /** Release the capture slot (only if we still own it). */
-    fun end(source: String) {
+    /**
+     * Release the capture slot (only if we still own it).
+     *
+     * [generation] is optional so existing callers stay unchanged; pass the
+     * token from [begin] to make a late call from a wedged predecessor a
+     * no-op instead of tearing down a newer stream.
+     */
+    fun end(source: String, generation: Long? = null) {
         synchronized(lock) {
-            if (activeSource == source) {
-                activeSource = null
-                ws = null
-            }
-            releaseWakeLock()
+            if (generation != null && generation != this.generation) return
+            releaseLocked(source)
         }
     }
 
+    /** Release the CPU (partial) stream wake lock. */
     private fun releaseWakeLock() {
         wakeLock?.let { w ->
             try {
@@ -87,14 +107,40 @@ object MediaBus {
      * becomes a no-op because the source no longer matches. The single-slot
      * "busy" lock can therefore never be held permanently.
      */
-    fun forceEnd(source: String) {
+    fun forceEnd(source: String, generation: Long? = null) {
         synchronized(lock) {
-            if (activeSource == source) {
-                activeSource = null
-                ws = null
+            if (generation != null && generation != this.generation) return
+            if (!releaseLocked(source)) {
+                // Orphaned teardown: the slot is already gone (worker died
+                // without its end), but a forgotten screen-awake session of
+                // THIS source must still not outlive the stream.
+                endStreamAwake(source)
             }
-            releaseWakeLock()
         }
+    }
+
+    /**
+     * Release the slot + this bus's own wake locks, only when [source] still
+     * owns the slot. Returns false when it was not ours (never release a newer
+     * or foreign session).
+     */
+    private fun releaseLocked(source: String): Boolean {
+        if (activeSource != source) return false
+        activeSource = null
+        ws = null
+        releaseWakeLock()
+        endStreamAwake(source)
+        return true
+    }
+
+    /** End the stream's screen-awake session (null = whatever is open). */
+    private fun endStreamAwake(source: String?) {
+        val token = streamAwakeToken
+        if (token == 0L) return
+        if (source != null && streamAwakeSource != source) return
+        streamAwakeToken = 0L
+        streamAwakeSource = null
+        ScreenAwakeController.end(token)
     }
 
     fun isActive(source: String): Boolean = activeSource == source
@@ -113,6 +159,9 @@ object MediaBus {
      * (caller should end the stream).
      */
     fun sendFrame(stream: String, payload: ByteArray, extra: JSONObject? = null): Boolean {
+        // Producing a frame is real stream activity: extend the screen-awake
+        // session's idle allowance (idle-expired/ended tokens are a no-op).
+        ScreenAwakeController.refresh(streamAwakeToken)
         val w = ws ?: return false
         val header = JSONObject()
             .put("type", "frame")

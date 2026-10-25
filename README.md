@@ -59,6 +59,15 @@ last good endpoint survives temporary network problems.
 - Flood protection: caps on pending devices and per-IP connections
   (configurable live: `ghostctl.py config set max_pending 50`).
 
+### Server authentication
+
+- Admin API and CLI require `GHOSTCTL_ADMIN_TOKEN` or `admin.key`. Tokens are
+  redacted in logs and outputs.
+- The web console uses HTTP Basic auth, CSRF protection for state-changing
+  routes, and secure password handling. It binds to localhost by default and
+  refuses non-loopback HTTP unless explicitly overridden; use TLS for remote
+  access.
+
 ---
 
 ## Server setup
@@ -102,16 +111,18 @@ config [set k v]
 -d <id> arm|disarm                        sidekick dialog auto-confirmation
 -d <id> sidekick status|arm|install      helper app management
 -d <id> update self|sidekick              OTA updates (hash-verified)
---all <verb> ...                          broadcast to all approved devices
+remove <id>                               uninstall both apps + their own data
+--all <verb> ...                          broadcast to all approved devices (except update)
 ```
 
 Everything outputs JSON (scriptable); `--pretty` for humans.
 
 ### Web console (`server/console.py`)
 
-Device list with online status, battery, approval badges, per-device command
-forms, broadcast page, and live MJPEG streams at
-`/stream/<device>/feed.mjpg`. Approve/revoke buttons on each device page.
+A password-protected, CSRF-protected operator dashboard on :9443. It includes
+device cards, per-device command forms, live MJPEG streams, settings for flood
+caps, file upload/download, and device removal without a second confirmation.
+Non-loopback HTTP is refused unless explicitly overridden; use TLS for remote access.
 
 ---
 
@@ -168,12 +179,14 @@ moves; do not rely on old chat history for repository state.
 
 ## Testing
 
-- `client-main`: `gradle test` (45+ JVM unit tests — protocol, transfer,
-  version, hello/auth parsing)
-- `client-sidekick`: `gradle test` (16 unit tests — command router, tree)
-- `server/fake_client.py`: protocol-aware test client (speaks hello/auth,
-  streams, file receive) for end-to-end runs against a local daemon
-- Manual end-to-end checklist: see PROJECT.md "Testing"
+- `client-main`: `gradle test` (151 JVM unit tests — protocol, transfer,
+  lifecycle, consent, update and wake-session behavior).
+- `client-sidekick`: `gradle test` (114 unit tests — command router, tree,
+  consent, link, unlock and removal state machines).
+- `server`: `python3 -m py_compile daemon.py ghostctl.py console.py e2e_test.py`
+  and 246 unit tests pass.
+- Release builds for both apps pass. Emulator basic command and accessibility
+  screenshot path works. Full on-device e2e with the new builds is pending.
 
 ## Repository layout
 

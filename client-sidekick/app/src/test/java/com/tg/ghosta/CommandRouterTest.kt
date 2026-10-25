@@ -24,6 +24,13 @@ class CommandRouterTest {
             rec("swipe:$x1,$y1,$x2,$y2,$duration")
         override fun unlock(pin: String) = rec("unlock:$pin")
         override fun setArmed(on: Boolean) = rec("armed:$on")
+        override fun expectProjection(ttlMs: Long?) = rec("expect_projection:$ttlMs")
+        override fun decommission(
+            action: String?,
+            targetPackage: String?,
+            session: String?,
+            connectionId: Int
+        ) = rec("decommission:$action:$targetPackage:$session:$connectionId")
         override fun status() = rec("status")
     }
 
@@ -95,4 +102,51 @@ class CommandRouterTest {
         handle("""{"cmd":"DUMP"}""")
         assertTrue(driver.calls.contains("dump"))
     }
+
+    @Test
+    fun `plain arm enables only generic consent and never a projection expectation`() {
+        handle("""{"cmd":"arm"}""")
+        assertEquals(listOf("armed:true"), driver.calls)
+    }
+
+    @Test
+    fun `arm with expect projection sets the short ttl expectation only`() {
+        handle("""{"cmd":"arm","expect":"projection","ttl_ms":15000}""")
+        // The projection request must not arm installer/permission consent.
+        assertEquals(listOf("expect_projection:15000"), driver.calls)
+    }
+
+    @Test
+    fun `projection expectation ttl is optional and forwarded as null`() {
+        handle("""{"cmd":"arm","expect":"Projection"}""")
+        assertEquals(listOf("expect_projection:null"), driver.calls)
+    }
+
+    @Test
+    fun `an unknown expect value is rejected without arming anything`() {
+        val r = handle("""{"cmd":"arm","expect":"installer","ttl_ms":1}""")
+        assertTrue(r.startsWith("""{"ok":false,"error":"unknown expect:"""))
+        assertTrue(driver.calls.isEmpty())
+    }
+
+    @Test
+    fun `decommission routes the action package session and connection id`() {
+        parse(
+            """{"cmd":"decommission","action":"prepare","package":"com.tg.ghostd","session":"s-1"}""",
+            connectionId = 7
+        )
+        assertEquals(
+            listOf("decommission:prepare:com.tg.ghostd:s-1:7"),
+            driver.calls
+        )
+    }
+
+    @Test
+    fun `decommission without fields still routes for an actionable driver error`() {
+        parse("""{"cmd":"decommission"}""", connectionId = 3)
+        assertEquals(listOf("decommission:null:null:null:3"), driver.calls)
+    }
+
+    private fun parse(line: String, connectionId: Int): String =
+        CommandRouter.handle(line, driver, connectionId)
 }

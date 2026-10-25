@@ -1,522 +1,1121 @@
 #!/usr/bin/env python3
-"""ghostctl web console — MeshCentral-inspired read/control UI.
+"""ghostctl web console — responsive operator dashboard.
 
-Serves server-rendered HTML (stdlib http.server, no external deps, works
-offline). Talks to the daemon the same way ghostctl.py does: it imports
-ghostctl and uses its rpc() against the daemon admin port
-(127.0.0.1:8444, env GHOSTCTL_ADMIN_HOST/PORT).
+Stdlib-only HTTP server (ThreadingHTTPServer). Talks to the daemon the same
+way ghostctl.py does: imports ghostctl and uses rpc() against the admin port.
 
-Pages:
-  /                 device list (auto-refresh), online dot, last_seen,
-                    battery, IP -> click through to detail
-  /device/<id>      device detail: command history + action forms
-                    (all ghostctl verbs) 1:1 with ghostctl.py
-  /cmd/<id>         result page after a POSTed command
-  /broadcast        pick a command + "--all" broadcast execution
-  /stream/<id>      MJPEG/streaming display; /stream/<id>/feed returns the
-                    latest cached frame as image/jpeg (poll-friendly) and
-                    /stream/<id>/feed.mjpg serves multipart/x-mixed-replace
-                    from the daemon's per-device latest-frame cache
-
-Auth: HTTP Basic (every request). Password from env GHOST_CONSOLE_PASS;
-if unset, a random one is generated and printed at startup.
-User field is ignored (any name works, e.g. curl -u ghost:<pass>).
+Security:
+  * HTTP Basic auth (constant-time compare, base64 validate=True)
+  * Per-IP failed-auth rate limiting/backoff
+  * CSRF: per-process random token in SameSite=Strict HttpOnly cookie plus
+    hidden form field; Origin/Referer verification when supplied
+  * Unguessable stream tokens for feed GETs
+  * Strict path parsing (unquote + validate device ids)
+  * CSP, X-Frame-Options DENY, nosniff, Referrer-Policy no-referrer,
+    Cache-Control no-store on all responses (including 401)
+  * Python server header suppressed
+  * Content-Length strict 0..64MiB for uploads, 1MiB otherwise
+  * Global request concurrency + max 4 MJPEG clients
+  * Socket read/write timeouts; broken-pipe handling
+  * Password never printed to stdout; generated password written to mode 600
+    console.pass for loopback binds; GHOST_CONSOLE_PASS required otherwise
+  * Non-loopback HTTP refused unless GHOST_CONSOLE_ALLOW_HTTP=1
 
 Run:  python3 console.py [--host 127.0.0.1] [--port 9443]
-Binds 127.0.0.1 by default. Use --host 0.0.0.0 for remote access, but
-remember to `sudo ufw allow` the port explicitly (do NOT open preemptively).
-
-Command history is read from history.json next to this file (runtime
-artifact written by daemon.py); read-only, tolerates its absence.
 """
 import argparse
 import base64
+import email.parser
 import hmac
 import html
 import json
 import os
+import re
 import secrets
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 BASE = Path(__file__).resolve().parent
-
-# .env next to the script (shared with daemon) may carry GHOST_CONSOLE_PASS
+UPLOAD_DIR = BASE / "uploads"
+UPLOAD_DIR.mkdir(mode=0o700, exist_ok=True)
 try:
-    for _line in (BASE / ".env").read_text().splitlines():
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _k, _, _v = _line.partition("=")
-            os.environ.setdefault(_k.strip(), _v.strip())
-except FileNotFoundError:
+    os.chmod(UPLOAD_DIR, 0o700)
+except OSError:
     pass
+
+# Secure umask for anything created by this process.
+try:
+    os.umask(0o077)
+except Exception:
+    pass
+
 sys.path.insert(0, str(BASE))
+from envfile import apply_dotenv  # noqa: E402
+
+# .env next to the script (shared with daemon) may carry GHOST_CONSOLE_PASS.
+# Existing process environment wins; values are never printed.
+apply_dotenv(BASE / ".env")
+
 import ghostctl  # noqa: E402  (reuse the CLI's daemon client code)
+import console_ui as ui  # noqa: E402
 
-HISTORY_FILE = BASE / "history.json"
+# ---------------------------------------------------------------------------
+# Globals
+# ---------------------------------------------------------------------------
+CSRF_TOKEN = secrets.token_urlsafe(32)
+AUTH_FAILURES = {}          # ip -> [count, last_fail_ts]
+AUTH_LOCK = threading.Lock()
+MAX_AUTH_FAILURES = 10
+AUTH_BACKOFF = 60.0         # seconds
+MAX_AUTH_ENTRIES = 1024     # hard cap on tracked source IPs
 
-# Verbs the console exposes — 1:1 with ghostctl.py's supported set.
-# Each: (action, label, [(argname, placeholder, default), ...], needs_args)
-DEVICE_FORMS = [
-    ("shell",           "shell",            [("arg", "echo hi", "")],               True),
-    ("ui dump",         "ui dump",         [],                                     False),
-    ("ui find",        "ui find",         [("arg", "--text Login", "")],          True),
-    ("tap",            "tap",             [("arg", "100 200", "")],               True),
-    ("longclick",      "longclick",       [("arg", "100 200", "")],               True),
-    ("type",           "type",            [("arg", "hello world", "")],           True),
-    ("key",            "key",             [("arg", "4", "")],                     True),
-    ("swipe",          "swipe",           [("arg", "100 200 300 400", "")],       True),
-    ("unlock",         "unlock",          [("arg", "1234", "")],                  True),
-    ("arm",            "arm",             [],                                     False),
-    ("disarm",         "disarm",          [],                                     False),
-    ("sidekick status", "sidekick status", [],                                  False),
-    ("sidekick arm",   "sidekick arm",    [],                                    False),
-    ("sidekick disarm", "sidekick disarm", [],                                   False),
-    ("sidekick ping",  "sidekick ping",   [],                                    False),
-    ("sidekick install", "sidekick install", [("arg", "/sdcard/Download/ghosta.apk", "")], True),
-    ("files ls",       "files ls",         [("arg", "/sdcard", "/sdcard")],        True),
-    ("files tree",     "files tree",       [("arg", "/sdcard --depth 3", "/sdcard")], True),
-    ("files get",      "files get",        [("arg", "/sdcard/x.jpg", "")],         True),
-    ("files put",      "files put",        [("arg", "/sdcard/Download/x.bin", "")], True),
-    ("screen shot",    "screen shot",     [],                                     False),
-    ("screen record",  "screen record",   [("arg", "10 --fps 5", "10")],          True),
-    ("screen live",    "screen live",      [("arg", "--fps 5 --quality 60", "")],  True),
-    ("screen stop",    "screen stop",     [],                                     False),
-    ("screen off",     "screen off",      [],                                     False),
-    ("cam snap",       "cam snap",         [("arg", "back", "back")],              True),
-    ("cam live",       "cam live",         [("arg", "back --quality high", "back")], True),
-    ("cam stop",       "cam stop",        [],                                     False),
-    ("mic record",     "mic record",      [("arg", "10", "10")],                  True),
-    ("mic live",       "mic live",         [],                                     False),
-    ("mic stop",       "mic stop",        [],                                     False),
-    ("brightness get", "brightness get",   [],                                     False),
-    ("brightness set", "brightness set",   [("arg", "10", "10")],                 True),
-    ("volume get",     "volume get",       [("arg", "media", "media")],            True),
-    ("volume set",     "volume set",       [("arg", "media 30", "media 30")],      True),
-    ("volume mute",    "volume mute",      [("arg", "media", "media")],            True),
-    ("volume unmute",  "volume unmute",    [("arg", "media", "media")],            True),
-    ("wake",           "wake",             [],                                     False),
-    ("sms recent",     "sms recent",       [("arg", "20", "20")],                  True),
-    ("loc once",       "loc once",         [],                                     False),
-    ("device info",    "device info",      [],                                     False),
-    ("update",         "update",           [("arg", "sidekick", "sidekick")],      True),
-    ("hide",           "hide",             [],                                     False),
-    ("unhide",         "unhide",           [],                                     False),
-    ("status",         "status",           [],                                     False),
-    ("ping",           "ping",             [],                                     False),
-    ("destroy",        "destroy",          [],                                     False),
-]
-# Split-verb actions map to (action, args) the way ghostctl.build_args does.
-DANGEROUS = {"destroy"}
-VERBS = [f[0] for f in DEVICE_FORMS]
+REQUEST_SEM = threading.BoundedSemaphore(64)
+STREAM_SEM = threading.BoundedSemaphore(4)
+STREAM_TOKENS = {}          # token -> (device_id, expires_ts)
+STREAM_TOKENS_LOCK = threading.Lock()
+STREAM_TOKEN_TTL = 300.0    # seconds
 
-PASSWORD = os.environ.get("GHOST_CONSOLE_PASS") or secrets.token_urlsafe(9)
+# Device id validation: safe URL/HTML/JS charset.
+DEVICE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+# Download path validation: no traversal, no absolute escapes.
+PATH_RE = re.compile(r"^[A-Za-z0-9_./-]{1,512}$")
+
+MAX_BODY = 1 * 1024 * 1024          # 1 MiB for normal POSTs
+MAX_UPLOAD = 64 * 1024 * 1024       # 64 MiB for file uploads
+MAX_FRAME_BYTES = 16 * 1024 * 1024  # 16 MiB display/response cap
+FRAME_MAX_AGE = 15.0                # seconds; stale frames are rejected
 
 
-def e(s):
-    """html.escape for str/anything."""
-    return html.escape(str(s if s is not None else ""))
+def _now():
+    return time.time()
 
 
-def fmt_age(ts):
-    if not ts:
-        return "-"
-    d = max(0, int(time.time() - ts))
-    if d < 60:
-        return f"{d}s ago"
-    if d < 3600:
-        return f"{d // 60}m ago"
-    if d < 86400:
-        return f"{d // 3600}h ago"
-    return f"{d // 86400}d ago"
+def _log(msg):
+    """Log to stderr with timestamp. No secrets in messages."""
+    sys.stderr.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} console: {msg}\n")
+    sys.stderr.flush()
 
 
-def load_history():
+def _secure_log_file():
+    """If console.log exists, enforce mode 600."""
+    p = BASE / "console.log"
     try:
-        return json.loads(HISTORY_FILE.read_text())
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return []
+        if p.exists():
+            os.chmod(p, 0o600)
+    except OSError:
+        pass
 
 
-def parse_verb(verb):
-    """Mirror ghostctl.build_args: 'files ls /sdcard' -> ('files', ['/sdcard']),
-    'shell echo hi' -> ('shell', ['echo hi']) — shell takes one string."""
+def _prune_auth_locked(now):
+    """Expire stale failure records and keep the source-IP map bounded.
+
+    Called with AUTH_LOCK held. Without this, an attacker cycling source
+    addresses would grow AUTH_FAILURES forever.
+    """
+    for ip, rec in list(AUTH_FAILURES.items()):
+        if not rec or now - rec[1] > AUTH_BACKOFF:
+            AUTH_FAILURES.pop(ip, None)
+    if len(AUTH_FAILURES) >= MAX_AUTH_ENTRIES:
+        # Keep the most recent half: one sweep amortizes the next many calls.
+        newest = sorted(AUTH_FAILURES.items(), key=lambda kv: kv[1][1])
+        keep = max(0, MAX_AUTH_ENTRIES // 2 - 1)
+        for ip, _rec in newest[:len(newest) - keep]:
+            AUTH_FAILURES.pop(ip, None)
+
+
+def _auth_failure(ip):
+    with AUTH_LOCK:
+        now = _now()
+        _prune_auth_locked(now)
+        rec = AUTH_FAILURES.get(ip)
+        if rec is None:
+            AUTH_FAILURES[ip] = [1, now]
+            return
+        # Reset window after backoff period (normally pruned above).
+        if now - rec[1] > AUTH_BACKOFF:
+            AUTH_FAILURES[ip] = [1, now]
+        else:
+            rec[0] += 1
+            rec[1] = now
+
+
+def _auth_blocked(ip):
+    with AUTH_LOCK:
+        now = _now()
+        _prune_auth_locked(now)
+        rec = AUTH_FAILURES.get(ip)
+        if not rec:
+            return False
+        count, last = rec
+        if count >= MAX_AUTH_FAILURES and now - last < AUTH_BACKOFF:
+            return True
+        return False
+
+
+def _auth_success(ip):
+    with AUTH_LOCK:
+        AUTH_FAILURES.pop(ip, None)
+
+
+def _new_stream_token(did):
+    tok = secrets.token_urlsafe(32)
+    now = _now()
+    with STREAM_TOKENS_LOCK:
+        # Prune expired tokens opportunistically.
+        for k in list(STREAM_TOKENS):
+            if STREAM_TOKENS[k][1] < now:
+                STREAM_TOKENS.pop(k, None)
+        STREAM_TOKENS[tok] = (did, now + STREAM_TOKEN_TTL)
+    return tok
+
+
+def _check_stream_token(tok, did):
+    if not tok:
+        return False
+    with STREAM_TOKENS_LOCK:
+        rec = STREAM_TOKENS.get(tok)
+        if not rec:
+            return False
+        tdid, exp = rec
+        if exp < _now():
+            STREAM_TOKENS.pop(tok, None)
+            return False
+        return tdid == did
+
+
+# ---------------------------------------------------------------------------
+# RPC helpers — wrap ghostctl.rpc with error handling and actor attribution.
+# ---------------------------------------------------------------------------
+def _rpc(req):
+    try:
+        return ghostctl.rpc(req)
+    except Exception as ex:  # daemon down, timeout, decode error
+        return {"ok": False, "error": str(ex)}
+
+
+def _rpc_list():
+    return _rpc({"op": "list"})
+
+
+def _rpc_pending():
+    return _rpc({"op": "pending"})
+
+
+def _rpc_history(did, limit=60):
+    resp = _rpc({"op": "history", "device_id": did, "limit": limit})
+    if isinstance(resp, dict) and resp.get("ok"):
+        return resp.get("history") or []
+    return []
+
+
+def _rpc_config():
+    return _rpc({"op": "config"})
+
+
+def _rpc_config_set(key, value):
+    return _rpc({"op": "config", "args": ["set", key, str(value)]})
+
+
+def _rpc_command(did, verb, actor, wait=20.0):
     parts = verb.split(None, 1)
     action = parts[0]
     rest = parts[1] if len(parts) > 1 else ""
-    if action == "shell":
-        return action, [rest] if rest else []
-    return action, rest.split()
+    args = [rest] if action == "shell" and rest else (rest.split() if rest else [])
+    return _rpc({"op": "command", "all": False, "device_id": did,
+                 "action": action, "args": args, "wait": wait,
+                 "actor": actor, "source": "console"})
 
 
-def rpc_command(device_id, verb, wait=15.0):
-    action, args = parse_verb(verb)
-    return ghostctl.rpc({"op": "command", "all": False, "device_id": device_id,
-                         "action": action, "args": args, "wait": wait})
+def _rpc_broadcast(verb, actor, wait=20.0):
+    parts = verb.split(None, 1)
+    action = parts[0]
+    rest = parts[1] if len(parts) > 1 else ""
+    args = [rest] if action == "shell" and rest else (rest.split() if rest else [])
+    return _rpc({"op": "command", "all": True, "device_id": None,
+                 "action": action, "args": args, "wait": wait,
+                 "actor": actor, "source": "console"})
 
 
-def rpc_broadcast(verb, wait=15.0):
-    action, args = parse_verb(verb)
-    return ghostctl.rpc({"op": "command", "all": True, "device_id": None,
-                         "action": action, "args": args, "wait": wait})
+def _rpc_update(did, actor):
+    return _rpc({"op": "update", "device_id": did, "target": "self",
+                 "actor": actor, "source": "console"})
 
 
-def rpc_devices():
-    return ghostctl.rpc({"op": "list"})
+def _rpc_remove(did, actor):
+    # One explicit Remove command is the authorization: no separate confirm.
+    return _rpc({"op": "remove", "device_id": did, "actor": actor,
+                 "source": "console", "wait": 150.0})
 
 
-# ---------------------------------------------------------------- pages ----
-
-PAGE = """<!doctype html><html><head><meta charset="utf-8">
-<title>{title}</title><style>
-body{{font-family:system-ui,sans-serif;background:#111;color:#ddd;margin:1.5rem}}
-a{{color:#7fc}} table{{border-collapse:collapse;width:100%}}
-th,td{{border:1px solid #333;padding:.35rem .6rem;text-align:left;font-size:.9rem}}
-.dot{{display:inline-block;width:10px;height:10px;border-radius:50%}}
-.on{{background:#3e6}} .off{{background:#a33}}
-form{{display:inline-block;margin:.2rem 0}} input[type=text],select{{background:#222;color:#ddd;border:1px solid #444}}
-button{{background:#265;border:1px solid #48a;color:#dff;padding:.25rem .7rem;cursor:pointer}}
-.danger button{{background:#622;border-color:#a44;color:#fdd}}
-pre{{background:#1b1b1b;border:1px solid #333;padding:.6rem;overflow-x:auto}}
-.nav{{margin-bottom:1rem}} .muted{{color:#888}}
-</style>{head}</head><body>
-<div class="nav"><a href="/">devices</a> · <a href="/broadcast">broadcast</a></div>
-{body}</body></html>"""
+UPLOAD_WAIT = 180.0      # seconds; large staged uploads can be slow
+DOWNLOAD_WAIT = 120.0    # seconds; device -> server relay can be slow
 
 
-def render(title, body, refresh=None, extra_head=""):
-    head = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
-    head += extra_head
-    return PAGE.format(title=e(title), head=head, body=body)
-
-
-def page_devices():
+def _bounded_wait(value, default):
+    """Clamp a wait to the daemon's accepted finite 0.1..300s range."""
     try:
-        resp = rpc_devices()
-        devices = (resp or {}).get("devices", {})
-        if not isinstance(devices, dict):
-            devices = {}
-    except Exception as ex:  # daemon down
-        body = (f"<h1>Devices</h1><p class='muted'>daemon unreachable: {e(ex)}</p>"
-                "<p class='muted'>retrying… start it: <code>python3 daemon.py</code></p>")
-        return render("Devices", body, refresh=5)
-    rows = []
-    for did in sorted(devices):
-        d = devices[did] or {}
-        dot = "on" if d.get("online") else "off"
-        bat = d.get("battery")
-        bat = f"{bat}%" if bat is not None else "-"
-        appr = ("<b style='color:#2a2'>approved</b>" if d.get("approved")
-                else "<i style='color:#c60'>pending</i>")
-        name = d.get("name") or did
-        rows.append(
-            f"<tr><td><span class='dot {dot}'></span> {'on' if d.get('online') else 'off'}</td>"
-            f"<td><a href='/device/{quote(did)}'>{e(name)}</a>"
-            f"<br><small class=muted>{e(did[:16])}…</small></td>"
-            f"<td>{appr}</td>"
-            f"<td>{e(fmt_age(d.get('last_seen')))}</td><td>{e(bat)}</td>"
-            f"<td>{e(d.get('ip') or '-')}</td>"
-            f"<td><a href='/stream/{quote(did)}'>stream</a></td></tr>")
-    body = ("<h1>Devices</h1><table><tr><th></th><th>id / name</th><th>approval</th>"
-            "<th>last seen</th>"
-            "<th>battery</th><th>ip</th><th></th></tr>"
-            + ("".join(rows) or "<tr><td colspan=7 class=muted>none yet</td></tr>")
-            + "</table><p class=muted>auto-refresh 5s</p>")
-    return render("Devices", body, refresh=5)
-
-
-def page_device(did):
-    try:
-        resp = rpc_devices()
-        d = (resp or {}).get("devices", {}).get(did)
+        return ghostctl.bounded_wait(value, default)
     except Exception:
-        d = None
-    if d is None:
-        return 404, render("404", f"<h1>unknown device {e(did)}</h1><a href='/'>back</a>")
-    bat = d.get("battery")
-    forms = []
-    for verb, label, fields, _needs in DEVICE_FORMS:
-        inputs = "".join(
-            f" <input type='text' name='{name}' placeholder=\"{e(ph)}\" "
-            f"value='{e(val)}' size='30'>" for name, ph, val in fields)
-        confirm = ("onclick=\"return confirm('destroy %s? this wipes the device')\""
-                   % e(did)) if verb in DANGEROUS else ""
-        cls = " class='danger'" if verb in DANGEROUS else ""
-        forms.append(f"<form method='post' action='/device/{quote(did)}/cmd'{cls}>"
-                     f"<input type='hidden' name='verb' value='{e(verb)}'>"
-                     f"{inputs} <button {confirm}>{e(label)}</button></form>")
-    hist = [h for h in load_history() if h.get("device_id") == did]
-    hist.reverse()
-    hrows = "".join(
-        f"<tr><td>{e(fmt_age(h.get('ts')))}</td><td>{e(h.get('action'))} "
-        f"{e(' '.join(h.get('args') or []))}</td><td>{e(h.get('status'))}</td>"
-        f"<td><pre>{e(json.dumps(h.get('result'), ensure_ascii=False)[:400])}</pre></td></tr>"
-        for h in hist[:50])
-    appr = ("<b style='color:#2a2'>approved</b>" if d.get("approved")
-            else "<i style='color:#c60'>pending</i>")
-    title = d.get("name") or did
-    body = (
-        f"<h1>{e(title)}</h1>"
-        f"<p><small class=muted>{e(did)}</small></p>"
-        f"<p>status: <span class='dot {'on' if d.get('online') else 'off'}'></span>"
-        f" {'online' if d.get('online') else 'offline'} · "
-        f"approval: {appr} · "
-        f"battery: {e(bat if bat is not None else '-')} · ip: {e(d.get('ip') or '-')} · "
-        f"last seen: {e(fmt_age(d.get('last_seen')))} · "
-        f"<a href='/stream/{quote(did)}'>stream</a></p>"
-        f"<form method='post' action='/device/{quote(did)}/rename'>"
-        f"<input type='text' name='name' placeholder='device name' value='{e(d.get('name') or '')}' size='24'>"
-        f" <button>Rename</button></form> "
-        f"<form method='post' action='/device/{quote(did)}/approve'>"
-        f"<button>{'Re-approve' if d.get('approved') else 'Approve device'}</button></form> "
-        f"<form method='post' action='/device/{quote(did)}/revoke' class='danger'>"
-        f"<button onclick=\"return confirm('revoke %s? token is rotated')\">Revoke</button></form>"
-        "<h2>Actions</h2>" + "<br>".join(forms) +
-        "<h2>Command history</h2><table><tr><th>when</th><th>command</th>"
-        f"<th>status</th><th>result</th></tr>{hrows or '<tr><td colspan=4 class=muted>none</td></tr>'}</table>")
-    return 200, render(f"device {did}", body)
+        return default
 
 
-def page_cmd_result(title, resp, back_href):
-    ok = bool(resp.get("ok"))
-    detail = ""
+def _rpc_files_put(did, src, dest, actor, wait=UPLOAD_WAIT):
+    # The daemon ignores `wait` for files_put, but ghostctl.rpc uses it to
+    # size the admin socket timeout so a real upload is not cut off at 30s.
+    return _rpc({"op": "files_put", "device_id": did, "src": src,
+                 "dest": dest, "wait": _bounded_wait(wait, UPLOAD_WAIT),
+                 "actor": actor, "source": "console"})
+
+
+def _rpc_files_get(did, path, actor, wait=DOWNLOAD_WAIT):
+    # Prefer a dedicated op; fall back to the command verb for older daemons.
+    resp = _rpc({"op": "files_get", "device_id": did, "path": path,
+                 "wait": _bounded_wait(wait, DOWNLOAD_WAIT),
+                 "actor": actor, "source": "console"})
+    if isinstance(resp, dict) and "error" in resp and "unknown op" in str(resp.get("error", "")):
+        resp = _rpc({"op": "command", "all": False, "device_id": did,
+                     "action": "files", "args": ["get", path],
+                     "wait": _bounded_wait(wait, DOWNLOAD_WAIT),
+                     "actor": actor, "source": "console"})
+    return resp
+
+
+def _rpc_stream_frame(did):
+    return _rpc({"op": "stream_frame", "device_id": did})
+
+
+# ---------------------------------------------------------------------------
+# Validation / parsing helpers
+# ---------------------------------------------------------------------------
+def _valid_device_id(did):
+    return bool(did) and bool(DEVICE_ID_RE.match(did))
+
+
+def _valid_path(path):
+    if not path or not PATH_RE.match(path):
+        return False
+    if ".." in path or "\\" in path:
+        return False
+    return True
+
+
+def _parse_multipart(content_type, body, max_parts=10):
+    """Parse multipart/form-data safely. Returns (fields, file_paths)."""
+    fields = {}
+    file_paths = []
+    try:
+        msg = email.parser.BytesParser().parsebytes(
+            b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + body)
+    except Exception:
+        return fields, file_paths
+    if not msg.is_multipart():
+        return fields, file_paths
+    count = 0
+    try:
+        for part in msg.get_payload():
+            count += 1
+            if count > max_parts:
+                break
+            name = part.get_param("name", header="content-disposition") or ""
+            filename = part.get_filename() or ""
+            payload = part.get_payload(decode=True) or b""
+            if filename:
+                # Save to uploads with a random name and mode 600.
+                fname = secrets.token_hex(16) + ".bin"
+                fpath = UPLOAD_DIR / fname
+                fd = os.open(str(fpath),
+                             os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                try:
+                    with os.fdopen(fd, "wb") as f:
+                        f.write(payload)
+                except Exception:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                    try:
+                        fpath.unlink()
+                    except OSError:
+                        pass
+                    raise
+                file_paths.append((name, str(fpath), filename))
+            else:
+                try:
+                    fields[name] = payload.decode("utf-8", "replace")
+                except Exception:
+                    fields[name] = ""
+    except Exception:
+        # Never leak a partially staged multipart body.
+        _cleanup_staged(file_paths)
+        return fields, []
+    return fields, file_paths
+
+
+def _clean_filename(name):
+    base = os.path.basename(str(name or "download.bin").replace("\\", "/"))
+    base = re.sub(r"[^A-Za-z0-9_.-]", "_", base)
+    if not base or base.startswith("."):
+        base = "download.bin"
+    return base[:255]
+
+
+def _default_dest(original_name):
+    """Blank upload dest -> /sdcard/Download/<sanitized original basename>."""
+    return "/sdcard/Download/" + _clean_filename(original_name)
+
+
+def _valid_upload_dest(path):
+    """Explicit upload destination: absolute, no traversal, safe charset."""
+    if not isinstance(path, str) or not path.startswith("/"):
+        return False
+    return _valid_path(path)
+
+
+def _cleanup_staged(files):
+    """Unlink every staged multipart file; safe to call more than once."""
+    for item in files or []:
+        try:
+            fpath = item[1] if isinstance(item, (tuple, list)) else item
+        except Exception:
+            continue
+        try:
+            os.unlink(fpath)
+        except OSError:
+            pass
+
+
+def _response_error(resp, default="request failed"):
+    """Best-effort error text from direct or command-entry RPC envelopes."""
+    if not isinstance(resp, dict):
+        return default
+    err = resp.get("error")
+    if isinstance(err, str) and err:
+        return err
     entry = resp.get("entry")
-    if entry:
-        detail = (f"<p>status: {e(entry.get('status'))} · device: "
-                  f"{e(entry.get('device_id'))} · cmd_id: {e(entry.get('cmd_id'))}</p>")
-    body = (f"<h1>{e(title)} — {'OK' if ok else 'FAILED'}</h1>"
-            f"<a href='{back_href}'>&larr; back</a> {detail}"
-            f"<pre>{e(json.dumps(resp, indent=2, ensure_ascii=False))}</pre>")
-    return render(title, body)
+    if isinstance(entry, dict):
+        result = entry.get("result")
+        if isinstance(result, dict):
+            rerr = result.get("error")
+            if isinstance(rerr, str) and rerr:
+                return rerr
+        elif isinstance(result, str) and result:
+            return result
+        status = entry.get("status")
+        if isinstance(status, str) and status and status != "ok":
+            return f"{default} ({status})"
+    return default
 
 
-def page_broadcast():
-    opts = "".join(f"<option value='{e(v)}'>{e(v)}</option>" for v in VERBS)
-    body = ("<h1>Broadcast (--all)</h1>"
-            "<form method='post' action='/broadcast'>"
-            "<select name='verb'>" + opts + "</select> "
-            "<input type='text' name='arg' placeholder='optional arg' size='30'> "
-            "<button onclick=\"return confirm('broadcast to ALL online devices?')\">"
-            "send to all</button></form>"
-            "<p class=muted>sends the verb to every online device via the daemon's "
-            "broadcast op; results shown per-device.</p>")
-    return render("Broadcast", body)
+def _download_b64(resp):
+    """Extract base64 file content from either daemon response shape.
+
+    Primary `files_get`: {"ok": true, "data": "<b64>"}
+    Legacy command fallback: {"ok": true,
+                              "entry": {"result": {"b64": "<b64>"}}}
+    """
+    if not isinstance(resp, dict) or not resp.get("ok"):
+        return None
+    for key in ("data", "content", "b64"):
+        val = resp.get(key)
+        if isinstance(val, str):
+            return val
+    entry = resp.get("entry")
+    result = entry.get("result") if isinstance(entry, dict) else None
+    if isinstance(result, dict):
+        for key in ("b64", "data", "content"):
+            val = result.get(key)
+            if isinstance(val, str):
+                return val
+    return None
 
 
-def page_stream(did):
-    body = (f"<h1>stream — {e(did)}</h1>"
-            f"<img id='feed' src='/stream/{quote(did)}/feed.mjpg' alt='stream' "
-            "style='max-width:100%;background:#000;min-height:60px'>"
-            "<p id='note' class=muted>waiting for stream…</p>"
-            "<p class=muted>Live MJPEG relay: the daemon caches the latest "
-            "frame per active device stream (screen/cam live) and the console "
-            "serves it from <code>/stream/&lt;id&gt;/feed.mjpg</code>. "
-            "Start one with e.g. <code>screen live</code> or "
-            "<code>cam live back</code>. Single-frame poll: "
-            "<code>/stream/&lt;id&gt;/feed</code> (image/jpeg).</p>"
-            "<a href='/device/" + quote(did) + "'>&larr; device</a>"
-            "<script>feed.onerror=()=>{feed.style.display='none';"
-            "note.textContent='no active stream for this device';"
-            "setTimeout(()=>{feed.style.display='';note.textContent='waiting…';"
-            "feed.src=feed.src;},3000)};</script>")
-    return render(f"stream {did}", body, extra_head="")
-
-
+# ---------------------------------------------------------------------------
+# Handler
+# ---------------------------------------------------------------------------
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ghostctl-console/1"
+    server_version = ""
+    sys_version = ""
 
-    def log_message(self, fmt, *args):  # quiet-ish
-        sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+    def version_string(self):
+        return ""
+
+    def setup(self):
+        super().setup()
+        try:
+            self.connection.settimeout(30)
+        except OSError:
+            pass
+
+    def log_message(self, fmt, *args):
+        # Suppress default logging; keep a compact line without secrets.
+        _log(f"{self.address_string()} {fmt % args}")
 
     # ---------------------------------------------------------- helpers --
-    def _send(self, code, body, ctype="text/html; charset=utf-8"):
-        data = body.encode() if isinstance(body, str) else body
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(data)
+    def _client_ip(self):
+        try:
+            return self.client_address[0]
+        except Exception:
+            return "unknown"
+
+    def _cookie_token(self):
+        cookie = self.headers.get("Cookie", "")
+        for part in cookie.split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == "csrf_token":
+                return v
+        return ""
+
+    def _send(self, code, body, ctype="text/html; charset=utf-8",
+              extra_headers=None):
+        data = body.encode("utf-8", "replace") if isinstance(body, str) else body
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
+                "form-action 'self'; script-src 'self'; style-src 'self' "
+                "'unsafe-inline'; img-src 'self' data: blob:")
+            # Refresh the CSRF cookie when absent or stale (e.g. after a
+            # console restart). Comparing the value, not just the key,
+            # prevents a stale cookie from pinning the browser to a token
+            # the process no longer accepts.
+            if code != 401:
+                current = self._cookie_token()
+                if not current or not hmac.compare_digest(
+                        current.encode(), CSRF_TOKEN.encode()):
+                    self.send_header(
+                        "Set-Cookie",
+                        f"csrf_token={CSRF_TOKEN}; HttpOnly; SameSite=Strict; "
+                        f"Path=/; Max-Age=86400")
+            if extra_headers:
+                for k, v in extra_headers.items():
+                    self.send_header(k, v)
+            self.end_headers()
+            if data:
+                self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            pass
 
     def _authed(self):
+        ip = self._client_ip()
+        if _auth_blocked(ip):
+            return False
         hdr = self.headers.get("Authorization", "")
-        if hdr.startswith("Basic "):
-            try:
-                _, _, pw = base64.b64decode(hdr[6:]).decode().partition(":")
-            except Exception:
-                pw = None
-            return pw is not None and hmac.compare_digest(
-                pw.encode(), PASSWORD.encode())
+        if not hdr.startswith("Basic "):
+            _auth_failure(ip)
+            return False
+        try:
+            raw = base64.b64decode(hdr[6:].strip(), validate=True)
+            decoded = raw.decode("utf-8")
+        except Exception:
+            _auth_failure(ip)
+            return False
+        _user, sep, pw = decoded.partition(":")
+        if not sep:
+            _auth_failure(ip)
+            return False
+        try:
+            ok = hmac.compare_digest(pw.encode(), PASSWORD.encode())
+        except Exception:
+            ok = False
+        if ok:
+            _auth_success(ip)
+            return True
+        _auth_failure(ip)
         return False
 
     def _check(self):
+        if _auth_blocked(self._client_ip()):
+            body = "too many failed auth attempts; retry later"
+            self._send(429, body, "text/plain",
+                       extra_headers={"Retry-After": str(int(AUTH_BACKOFF))})
+            return False
         if self._authed():
             return True
-        body = "<h1>401 Unauthorized</h1><p>ghostctl console: bad password</p>"
+        body = ui.render_unauthorized()
         self.send_response(401)
         self.send_header("WWW-Authenticate", 'Basic realm="ghostctl"')
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body.encode())))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy",
+                         "default-src 'none'; frame-ancestors 'none'")
         self.end_headers()
-        self.wfile.write(body.encode())
+        try:
+            self.wfile.write(body.encode())
+        except (BrokenPipeError, OSError):
+            pass
         return False
 
+    def _check_csrf(self, tok=None):
+        """Verify Origin/Referer when supplied and the CSRF token."""
+        origin = self.headers.get("Origin")
+        referer = self.headers.get("Referer")
+        host = self.headers.get("Host", "")
+        allowed = set()
+        if host:
+            allowed.add(f"http://{host}")
+            allowed.add(f"https://{host}")
+        if origin and origin not in allowed:
+            return False
+        if not origin and referer:
+            ok = False
+            for a in allowed:
+                if referer.startswith(a + "/") or referer == a:
+                    ok = True
+                    break
+            if not ok:
+                return False
+        # Token in form or header must match the process token.
+        if tok is None:
+            tok = self.headers.get("X-CSRF-Token", "")
+            if not tok:
+                qs = self._last_qs or {}
+                vals = qs.get("csrf_token") or []
+                tok = vals[0] if vals else ""
+        if not tok or not hmac.compare_digest(tok.encode(), CSRF_TOKEN.encode()):
+            return False
+        # The submitted token is compared against the process token above, so
+        # a stale cookie is not an authorization failure: _send refreshes it
+        # on this same response instead of locking the operator out.
+        return True
+
+    def _read_body(self, max_size):
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._send(400, "bad Content-Length", "text/plain")
+            return None
+        if n < 0:
+            self._send(400, "bad Content-Length", "text/plain")
+            return None
+        if n > max_size:
+            self._send(413, "payload too large", "text/plain")
+            return None
+        try:
+            return self.rfile.read(n)
+        except (OSError, ValueError):
+            self._send(400, "bad request body", "text/plain")
+            return None
+
     def _body_qs(self):
-        n = int(self.headers.get("Content-Length") or 0)
-        return parse_qs(self.rfile.read(n).decode() if n else "")
+        raw = self._read_body(MAX_BODY)
+        if raw is None:
+            return None
+        try:
+            return parse_qs(raw.decode("utf-8", "replace"))
+        except Exception:
+            return {}
+
+    _last_qs = None
 
     # -------------------------------------------------------------- GET --
     def do_GET(self):
-        if not self._check():
+        if not REQUEST_SEM.acquire(blocking=False):
+            self._send(503, "server busy", "text/plain")
             return
-        u = urlparse(self.path)
-        p = u.path.rstrip("/") or "/"
-        if p == "/":
-            self._send(200, page_devices())
-        elif p.startswith("/device/"):
-            code, page = page_device(p.split("/", 2)[2])
-            self._send(code, page)
-        elif p == "/broadcast":
-            self._send(200, page_broadcast())
-        elif p.startswith("/stream/"):
-            did = p.split("/", 2)[2]
-            if did.endswith("/feed.mjpg"):
-                self.stream_mjpg(did[: -len("/feed.mjpg")])
-            elif did.endswith("/feed"):
-                self.stream_feed(did[: -len("/feed")])
-            else:
-                self._send(200, page_stream(did))
-        elif p == "/favicon.ico":
-            self._send(204, b"", ctype="image/x-icon")
+        try:
+            if not self._check():
+                return
+            u = urlparse(self.path)
+            parts = [unquote(p) for p in u.path.strip("/").split("/") if p]
+            if not parts:
+                self._send(200, ui.render_dashboard(
+                    *_dashboard_data(), csrf_token=CSRF_TOKEN))
+                return
+            if parts[0] == "static":
+                self._serve_static(parts)
+                return
+            if parts[0] == "settings":
+                resp = _rpc_config()
+                cfg = resp.get("config") if isinstance(resp, dict) else {}
+                self._send(200, ui.render_settings(cfg or {}, csrf_token=CSRF_TOKEN))
+                return
+            if parts[0] == "files" and len(parts) > 1 and parts[1] == "download":
+                self._file_download(u.query)
+                return
+            if parts[0] == "stream" and len(parts) >= 2:
+                did = parts[1]
+                if not _valid_device_id(did):
+                    self._send(400, "bad device id", "text/plain")
+                    return
+                if len(parts) == 2:
+                    # Render stream page with a fresh token.
+                    tok = _new_stream_token(did)
+                    dev = _device_by_id(did)
+                    if dev is None:
+                        self._send(404, ui.render_404(f"unknown device {did}"))
+                        return
+                    self._send(200, ui.render_stream(dev, tok, csrf_token=CSRF_TOKEN))
+                    return
+                if len(parts) == 3 and parts[2] == "feed":
+                    self.stream_feed(did)
+                    return
+                if len(parts) == 3 and parts[2] == "feed.mjpg":
+                    self.stream_mjpg(did)
+                    return
+                self._send(404, ui.render_404())
+                return
+            if parts[0] == "device" and len(parts) >= 2:
+                did = parts[1]
+                if not _valid_device_id(did):
+                    self._send(400, "bad device id", "text/plain")
+                    return
+                if len(parts) == 2:
+                    dev = _device_by_id(did)
+                    if dev is None:
+                        self._send(404, ui.render_404(f"unknown device {did}"))
+                        return
+                    hist = _rpc_history(did, 60)
+                    self._send(200, ui.render_device(dev, hist, csrf_token=CSRF_TOKEN))
+                    return
+                self._send(404, ui.render_404())
+                return
+            if parts[0] == "favicon.ico":
+                self._send(204, b"", "image/x-icon")
+                return
+            self._send(404, ui.render_404())
+        except Exception as ex:
+            _log(f"GET error: {ex}")
+            self._send(500, "internal error", "text/plain")
+        finally:
+            REQUEST_SEM.release()
+
+    def _serve_static(self, parts):
+        if len(parts) != 2:
+            self._send(404, "not found", "text/plain")
+            return
+        if parts[1] == "app.css":
+            self._send(200, ui.CSS, "text/css; charset=utf-8")
+        elif parts[1] == "app.js":
+            self._send(200, ui.JS, "application/javascript; charset=utf-8")
         else:
-            self._send(404, render("404", "<h1>404</h1><a href='/'>devices</a>"))
+            self._send(404, "not found", "text/plain")
 
     # ------------------------------------------------------------- POST --
     def do_POST(self):
-        if not self._check():
+        if not REQUEST_SEM.acquire(blocking=False):
+            self._send(503, "server busy", "text/plain")
             return
-        u = urlparse(self.path)
-        p = u.path.rstrip("/")
-        qs = self._body_qs()
-        if p.startswith("/device/") and p.endswith("/rename"):
-            did = p[len("/device/"):-len("/rename")]
-            name = (qs.get("name") or [""])[0].strip()
-            try:
-                resp = ghostctl.rpc({"op": "rename", "device_id": did, "name": name})
-            except Exception as ex:
-                resp = {"ok": False, "error": str(ex)}
-            self._send(200, page_cmd_result(f"rename → {did}", resp,
-                                            f"/device/{quote(did)}"))
-            return
-        if p.startswith("/device/") and p.endswith("/approve"):
-            did = p[len("/device/"):-len("/approve")]
-            try:
-                resp = ghostctl.rpc({"op": "approve", "device_id": did})
-            except Exception as ex:
-                resp = {"ok": False, "error": str(ex)}
-            self._send(200, page_cmd_result(f"approve → {did}", resp,
-                                            f"/device/{quote(did)}"))
-            return
-        if p.startswith("/device/") and p.endswith("/revoke"):
-            did = p[len("/device/"):-len("/revoke")]
-            try:
-                resp = ghostctl.rpc({"op": "revoke", "device_id": did})
-            except Exception as ex:
-                resp = {"ok": False, "error": str(ex)}
-            self._send(200, page_cmd_result(f"revoke → {did}", resp,
-                                            f"/device/{quote(did)}"))
-            return
-        verb = (qs.get("verb") or [""])[0].strip()
-        arg = (qs.get("arg") or [""])[0].strip()
-        if verb not in VERBS:
-            self._send(400, render("bad request",
-                                   f"<h1>bad verb {e(verb)}</h1><a href='/'>back</a>"))
-            return
-        if arg:
-            verb = f"{verb} {arg}"
-        if p.startswith("/device/") and p.endswith("/cmd"):
-            did = p[len("/device/"):-len("/cmd")]
-            try:
-                resp = rpc_command(did, verb, wait=20.0)
-            except Exception as ex:
-                resp = {"ok": False, "error": str(ex)}
-            self._send(200, page_cmd_result(f"{verb} → {did}", resp,
-                                            f"/device/{quote(did)}"))
-        elif p == "/broadcast":
-            try:
-                resp = rpc_broadcast(verb, wait=20.0)
-            except Exception as ex:
-                resp = {"ok": False, "error": str(ex)}
-            self._send(200, page_cmd_result(f"broadcast {verb}", resp, "/broadcast"))
-        else:
-            self._send(404, render("404", "<h1>404</h1><a href='/'>devices</a>"))
-
-    # ---------------------------------------------------------- stream ----
-    def _fetch_frame(self, did):
-        """Latest cached JPEG frame for a device, via the daemon admin port.
-        Returns (stream_name, jpeg_bytes) or (None, error)."""
         try:
-            resp = ghostctl.rpc({"op": "stream_frame", "device_id": did})
-        except Exception as ex:  # daemon down
-            return None, f"daemon unreachable: {ex}"
-        if not resp.get("ok"):
-            return None, resp.get("error", "no frame")
-        return resp.get("stream"), base64.b64decode(resp["frame_b64"])
+            if not self._check():
+                return
+            u = urlparse(self.path)
+            parts = [unquote(p) for p in u.path.strip("/").split("/") if p]
+            if not parts:
+                self._send(404, ui.render_404())
+                return
 
-    def stream_feed(self, did):
-        """/stream/<id>/feed — poll-friendly single latest frame (image/jpeg);
-        503 while no stream/frame is cached for the device."""
-        stream, frame = self._fetch_frame(did)
-        if frame is None:
-            self._send(503, f"no active jpeg stream for {did}: {stream}",
-                       ctype="text/plain")
+            # File uploads use raw multipart, not _body_qs.
+            if parts[0] == "files" and len(parts) > 1 and parts[1] == "upload":
+                self._file_upload()
+                return
+            if parts[0] == "files" and len(parts) > 1 and parts[1] == "abort":
+                self._file_abort()
+                return
+
+            self._last_qs = self._body_qs()
+            if self._last_qs is None:
+                return
+            if not self._check_csrf():
+                self._send(403, "CSRF check failed", "text/plain")
+                return
+
+            qs = self._last_qs
+            actor = self._client_ip()
+
+            if parts[0] == "settings":
+                results = {}
+                for key in ("max_pending", "max_per_ip"):
+                    vals = qs.get(key) or []
+                    if vals:
+                        results[key] = _rpc_config_set(key, vals[0])
+                if not results:
+                    resp = {"ok": False, "error": "no settings provided"}
+                else:
+                    resp = {"ok": all(r.get("ok") for r in results.values()),
+                            "results": results}
+                self._send(200, ui.render_result("settings", resp, "/settings",
+                                                 csrf_token=CSRF_TOKEN))
+                return
+
+            if parts[0] == "broadcast":
+                verb = (qs.get("verb") or [""])[0].strip()
+                arg = (qs.get("arg") or [""])[0].strip()
+                if verb not in ui.BROADCAST_VERBS:
+                    self._send(400, ui.render_404(f"broadcast verb not allowed: {verb}"))
+                    return
+                full = f"{verb} {arg}".strip() if arg else verb
+                resp = _rpc_broadcast(full, actor)
+                self._send(200, ui.render_result(f"broadcast {full}", resp,
+                                                 "/", csrf_token=CSRF_TOKEN))
+                return
+
+            if parts[0] == "device" and len(parts) >= 3:
+                did = parts[1]
+                if not _valid_device_id(did):
+                    self._send(400, "bad device id", "text/plain")
+                    return
+                action = parts[2]
+                back = f"/device/{ui.quote_safe(did)}"
+                if action == "remove":
+                    dev = _device_by_id(did) or {"device_id": did}
+                    resp = _rpc_remove(did, actor)
+                    self._send(200, ui.render_remove_result(
+                        dev, resp, csrf_token=CSRF_TOKEN))
+                    return
+                if action == "rename":
+                    name = (qs.get("name") or [""])[0].strip()
+                    resp = _rpc({"op": "rename", "device_id": did,
+                                 "name": name, "actor": actor, "source": "console"})
+                elif action == "approve":
+                    resp = _rpc({"op": "approve", "device_id": did,
+                                 "actor": actor, "source": "console"})
+                elif action == "revoke":
+                    resp = _rpc({"op": "revoke", "device_id": did,
+                                 "actor": actor, "source": "console"})
+                elif action == "update":
+                    resp = _rpc_update(did, actor)
+                elif action == "cmd":
+                    verb = (qs.get("verb") or [""])[0].strip()
+                    arg = (qs.get("arg") or [""])[0].strip()
+                    if verb not in ui.ALLOWED_VERBS:
+                        self._send(400, ui.render_404(f"verb not allowed: {verb}"))
+                        return
+                    full = f"{verb} {arg}".strip() if arg else verb
+                    resp = _rpc_command(did, full, actor)
+                else:
+                    self._send(404, ui.render_404())
+                    return
+                self._send(200, ui.render_result(f"{action} → {did}", resp, back,
+                                                 csrf_token=CSRF_TOKEN))
+                return
+
+            self._send(404, ui.render_404())
+        except Exception as ex:
+            _log(f"POST error: {ex}")
+            self._send(500, "internal error", "text/plain")
+        finally:
+            REQUEST_SEM.release()
+
+    # ---------------------------------------------------------- uploads --
+    def _file_upload(self):
+        ctype = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in ctype:
+            self._send(400, "expected multipart/form-data", "text/plain")
             return
-        self._send(200, frame, ctype="image/jpeg")
+        raw = self._read_body(MAX_UPLOAD)
+        if raw is None:
+            return
+        fields = {}
+        files = []
+        try:
+            fields, files = _parse_multipart(ctype, raw)
+            if not files:
+                self._send(400, "no file part", "text/plain")
+                return
+            if not self._check_csrf(fields.get("csrf_token")):
+                self._send(403, "CSRF check failed", "text/plain")
+                return
+            did = fields.get("device_id", "").strip()
+            if not _valid_device_id(did):
+                self._send(400, "bad device id", "text/plain")
+                return
+            dest_raw = fields.get("dest", "").strip()
+            if dest_raw and not _valid_upload_dest(dest_raw):
+                self._send(400, "invalid upload destination: use an absolute "
+                                 "path without '..'", "text/plain")
+                return
+            if len(files) > 1 and dest_raw and not dest_raw.endswith("/"):
+                self._send(400, "upload destination must be a directory "
+                                 "(trailing /) when sending multiple files",
+                           "text/plain")
+                return
+            actor = self._client_ip()
+            results = []
+            for _field, fpath, orig in files:
+                dest = dest_raw or _default_dest(orig)
+                resp = _rpc_files_put(did, fpath, dest, actor)
+                results.append({"file": orig, "dest": dest, "result": resp})
+            ok = all(isinstance(r["result"], dict) and r["result"].get("ok")
+                     for r in results)
+            if len(results) == 1:
+                payload = results[0]["result"]
+            else:
+                payload = {"ok": ok, "files": results}
+            self._send(200 if ok else 502,
+                       ui.render_result(f"upload → {did}", payload,
+                                        f"/device/{ui.quote_safe(did)}",
+                                        csrf_token=CSRF_TOKEN))
+        finally:
+            # Every validation and transfer path must remove staged bytes.
+            _cleanup_staged(files)
+
+    def _file_abort(self):
+        qs = self._body_qs()
+        if qs is None:
+            return
+        self._last_qs = qs
+        if not self._check_csrf():
+            self._send(403, "CSRF check failed", "text/plain")
+            return
+        did = (qs.get("device_id") or [""])[0].strip()
+        if not _valid_device_id(did):
+            self._send(400, "bad device id", "text/plain")
+            return
+        # This is a real device command (`files abort`), not a local ack:
+        # the daemon may have already streamed bytes, so say "requested".
+        resp = _rpc_command(did, "files abort", self._client_ip(), wait=20.0)
+        if isinstance(resp, dict) and resp.get("ok"):
+            self._send(200, f"abort requested for {did}; the device cancels "
+                            f"the transfer when the command arrives and any "
+                            f"server-side work already in progress may still "
+                            f"finish", "text/plain")
+            return
+        err = _response_error(resp, "abort request failed")
+        self._send(502, f"abort request failed: {err}", "text/plain")
+
+    def _file_download(self, query):
+        qs = parse_qs(query)
+        did = (qs.get("device_id") or [""])[0]
+        path = (qs.get("path") or [""])[0]
+        if not _valid_device_id(did) or not _valid_path(path):
+            self._send(400, "bad device id or path", "text/plain")
+            return
+        actor = self._client_ip()
+        resp = _rpc_files_get(did, path, actor)
+        if not isinstance(resp, dict) or not resp.get("ok"):
+            err = _response_error(resp)
+            self._send(502, f"download failed: {err}", "text/plain")
+            return
+        data = _download_b64(resp)
+        if data is None:
+            err = _response_error(
+                resp, "daemon or device did not return file content")
+            self._send(502, f"download failed: {err}", "text/plain")
+            return
+        try:
+            # Empty base64 is a valid verified zero-byte download.
+            payload = base64.b64decode(data, validate=True)
+        except Exception:
+            self._send(502, "download decode failed", "text/plain")
+            return
+        if len(payload) > MAX_UPLOAD:
+            self._send(413, "download too large", "text/plain")
+            return
+        fname = _clean_filename(os.path.basename(path))
+        self._send(200, payload, "application/octet-stream",
+                   extra_headers={"Content-Disposition":
+                                  f'attachment; filename="{fname}"'})
+
+    # ----------------------------------------------------------- stream --
+    def stream_feed(self, did):
+        tok = parse_qs(urlparse(self.path).query).get("t", [""])[0]
+        if not _check_stream_token(tok, did):
+            self._send(403, "invalid or expired stream token", "text/plain")
+            return
+        if not _device_ok(did):
+            self._send(503, "device offline or not approved", "text/plain")
+            return
+        stream, frame, ts, err = _fetch_frame(did)
+        if err or frame is None:
+            self._send(503, f"no active jpeg stream: {err}", "text/plain")
+            return
+        self._send(200, frame, "image/jpeg")
 
     def stream_mjpg(self, did):
-        """/stream/<id>/feed.mjpg — multipart/x-mixed-replace MJPEG served from
-        the daemon's latest-frame cache. Polls ~5 fps; drops the client when
-        the connection breaks."""
-        self.send_response(200)
-        self.send_header("Content-Type",
-                         "multipart/x-mixed-replace; boundary=frame")
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        last = b""
+        tok = parse_qs(urlparse(self.path).query).get("t", [""])[0]
+        if not _check_stream_token(tok, did):
+            self._send(403, "invalid or expired stream token", "text/plain")
+            return
+        if not _device_ok(did):
+            self._send(503, "device offline or not approved", "text/plain")
+            return
+        if not STREAM_SEM.acquire(blocking=False):
+            self._send(503, "too many stream clients", "text/plain")
+            return
         try:
-            while True:
-                _stream, frame = self._fetch_frame(did)
-                if frame and frame != last:
-                    last = frame
-                    self.wfile.write(b"--frame\r\n")
-                    self.wfile.write(b"Content-Type: image/jpeg\r\n"
-                                     + f"Content-Length: {len(frame)}\r\n\r\n".encode()
-                                     + frame + b"\r\n")
-                    self.wfile.flush()
-                    time.sleep(0.2)
-                else:
-                    time.sleep(0.3)
-        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError,
-                OSError):
+            # Fetch first frame BEFORE headers so a dead/empty stream gets 503.
+            stream, first, _ts, err = _fetch_frame(did)
+            if err or first is None:
+                self._send(503, f"no active jpeg stream: {err}", "text/plain")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type",
+                             "multipart/x-mixed-replace; boundary=frame")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            last = b""
+            last_send = _now()
+            try:
+                while True:
+                    _stream, frame, _ts, err = _fetch_frame(did)
+                    now = _now()
+                    if frame and not err and frame != last:
+                        last = frame
+                        self.wfile.write(b"--frame\r\n")
+                        self.wfile.write(b"Content-Type: image/jpeg\r\n"
+                                         + f"Content-Length: {len(frame)}\r\n\r\n".encode()
+                                         + frame + b"\r\n")
+                        self.wfile.flush()
+                        last_send = now
+                    elif now - last_send > 10.0:
+                        break
+                    else:
+                        # Heartbeat comment keeps dead sockets raising.
+                        try:
+                            self.wfile.write(b"\r\n--frame\r\n")
+                            self.wfile.flush()
+                        except (BrokenPipeError, ConnectionResetError, OSError):
+                            break
+                        time.sleep(0.5)
+            except (BrokenPipeError, ConnectionResetError,
+                    ConnectionAbortedError, OSError):
+                pass
+        finally:
+            STREAM_SEM.release()
+
+
+# ---------------------------------------------------------------------------
+# Device lookup helpers
+# ---------------------------------------------------------------------------
+def _device_ok(did):
+    """Return True when the device exists, is online, and approved."""
+    dev = _device_by_id(did)
+    return bool(dev and dev.get("online") and dev.get("approved"))
+
+
+def _fetch_frame(did):
+    """Return (stream, frame_bytes, ts, err). err is None on success."""
+    try:
+        resp = _rpc_stream_frame(did)
+    except Exception as ex:
+        return None, None, None, f"daemon unreachable: {ex}"
+    if not isinstance(resp, dict):
+        return None, None, None, "malformed daemon response"
+    if not resp.get("ok"):
+        return None, None, None, resp.get("error", "no frame")
+    raw = resp.get("frame_b64")
+    if not isinstance(raw, str) or not raw:
+        return None, None, None, "missing frame_b64"
+    try:
+        frame = base64.b64decode(raw, validate=True)
+    except Exception:
+        return None, None, None, "invalid base64 frame"
+    if len(frame) > MAX_FRAME_BYTES:
+        return None, None, None, "frame too large"
+    ts = resp.get("ts")
+    if ts is not None:
+        try:
+            age = _now() - float(ts)
+            if age > FRAME_MAX_AGE:
+                return None, None, None, f"stale frame ({int(age)}s old)"
+        except (TypeError, ValueError):
+            return None, None, None, "invalid frame timestamp"
+    return resp.get("stream"), frame, ts, None
+
+
+def _dashboard_data():
+    resp = _rpc_list()
+    devices = resp.get("devices", {}) if isinstance(resp, dict) else {}
+    if not isinstance(devices, dict):
+        devices = {}
+    pending_resp = _rpc_pending()
+    pending = pending_resp.get("pending", {}) if isinstance(pending_resp, dict) else {}
+    if not isinstance(pending, dict):
+        pending = {}
+    # Pending ids are already in the main device list; avoid double-render.
+    pending = {k: v for k, v in pending.items() if not (devices.get(k) or {}).get("approved")}
+    return devices, pending
+
+
+def _device_by_id(did):
+    resp = _rpc_list()
+    if not isinstance(resp, dict):
+        return None
+    devs = resp.get("devices", {})
+    if not isinstance(devs, dict):
+        return None
+    d = devs.get(did)
+    if not isinstance(d, dict):
+        return None
+    d = dict(d)
+    d.setdefault("device_id", did)
+    return d
+
+
+# ---------------------------------------------------------------------------
+# Startup / password handling
+# ---------------------------------------------------------------------------
+def _is_loopback(host):
+    return host in ("127.0.0.1", "::1", "localhost", "")
+
+
+def _resolve_password(host):
+    pw = os.environ.get("GHOST_CONSOLE_PASS")
+    if pw:
+        return pw
+    if not _is_loopback(host):
+        sys.exit("GHOST_CONSOLE_PASS is required for non-loopback binds; "
+                 "set it in the environment or server/.env")
+    pw = secrets.token_urlsafe(18)
+    pass_file = BASE / "console.pass"
+    fd = os.open(str(pass_file), os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(pw)
+        os.chmod(str(pass_file), 0o600)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
             pass
+        raise
+    return pw
 
 
 def main():
     ap = argparse.ArgumentParser(description="ghostctl web console")
     ap.add_argument("--host", default="127.0.0.1",
                     help="bind host (default 127.0.0.1; use 0.0.0.0 for remote "
-                         "+ explicit `sudo ufw allow` — never open preemptively)")
+                         "+ explicit firewall rule — never open preemptively)")
     ap.add_argument("--port", type=int, default=9443)
     a = ap.parse_args()
+
+    _secure_log_file()
+
+    global PASSWORD
+    PASSWORD = _resolve_password(a.host)
+
+    if not _is_loopback(a.host):
+        allow_http = os.environ.get("GHOST_CONSOLE_ALLOW_HTTP") == "1"
+        if not allow_http:
+            sys.exit("Refusing to bind non-loopback without TLS. Put the console "
+                     "behind a TLS reverse proxy or set GHOST_CONSOLE_ALLOW_HTTP=1 "
+                     "to accept the risk.")
+        _log(f"WARNING: serving plain HTTP on non-loopback {a.host} "
+             f"(GHOST_CONSOLE_ALLOW_HTTP=1)")
+
     httpd = ThreadingHTTPServer((a.host, a.port), Handler)
-    gen = " (random, generated this start)" if not os.environ.get("GHOST_CONSOLE_PASS") else ""
-    print(f"ghostctl console: http://{a.host}:{a.port}  (user: anything, "
-          f"password{gen}: {PASSWORD})", flush=True)
-    print(f"set GHOST_CONSOLE_PASS=<pw> to fix the password; daemon admin "
-          f"at {ghostctl.ADMIN_HOST}:{ghostctl.ADMIN_PORT}", flush=True)
+    _log(f"ghostctl console listening on http://{a.host}:{a.port}")
+    if _is_loopback(a.host) and not os.environ.get("GHOST_CONSOLE_PASS"):
+        _log(f"generated password written to {BASE / 'console.pass'} (mode 600)")
+    _log(f"daemon admin at {ghostctl.ADMIN_HOST}:{ghostctl.ADMIN_PORT}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

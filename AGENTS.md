@@ -36,6 +36,13 @@ when scope is unclear. Do not add Play Protect/detection evasion, covert
 installation, consent bypass, or deceptive documentation. Be explicit about
 Android permissions, indicators and owner-controlled setup.
 
+## Current status (2026-10-26)
+
+- Local full verification: 246 server unit tests + `py_compile`, 151 ghostd unit tests, and 114 ghosta unit tests pass. Release builds pass.
+- Emulator currently has the initial 0.3.9/0.1.9 build installed; basic command and accessibility screenshot path passed. Current source is ghostd 0.4.0 / ghosta 0.2.0; those builds are not yet installed or device-e2e tested.
+- Kali server: not yet updated or restarted. Pixel test device must remain untouched during current local/emulator work.
+- Next steps: review -> GitHub push -> Kali pull and restart -> install emulator -> full e2e.
+
 ## Architecture rules
 
 1. Keep ghostd and ghosta separate. Merging accessibility with all the other
@@ -58,6 +65,24 @@ Android permissions, indicators and owner-controlled setup.
 6. Android camera/mic green dots and live MediaProjection indicators are OS
    behavior. Do not claim they can be hidden. Do close hardware promptly so
    indicators do not remain after capture ends.
+7. Owner-authorized device management uses the `specialUse` FGS type and
+   enforces `version_code` checks. Implement robust unlock flows and reconcile
+   OTA updates across process replacement. "Remove Device" requires no second
+   confirm, but automate known system sheets; never delete personal data as part
+   of removal. Keep the screen awake only during active operator sessions and
+   release after two minutes without command/frame activity or on disconnect.
+
+## Security and authentication
+
+- Admin API and CLI authenticate via `GHOSTCTL_ADMIN_TOKEN` or `admin.key`. Do
+  not print or commit tokens; redact them in logs and outputs.
+- The web console uses HTTP Basic authentication with CSRF protection for
+  state-changing routes and secure password handling. It provides a dashboard,
+  settings, file management, and device removal.
+- The console refuses non-loopback HTTP bindings unless explicitly overridden;
+  prefer TLS for remote access.
+- Command history, uploads, and console routes must not leak credentials or
+  personal data.
 
 ## Build and test
 
@@ -116,6 +141,14 @@ python3 ghostctl.py pending
 python3 ghostctl.py approve <device-id>
 python3 ghostctl.py rename <device-id> <name>
 ```
+
+Command line behavior:
+
+- File uploads use `files put <dest> <src>`; downloads return base64 content.
+- `ghostctl.py remove <device>` requests removal of both apps and their own
+  data. It never deletes personal files; the obsolete top-level `ping` stub is
+  removed, while `destroy` is now the implemented internal removal action.
+- `--all update` is rejected; broadcast updates are not allowed.
 
 Detached processes on the VPS were historically started with `setsid nohup`.
 If stopping them, use `pkill -f '[d]aemon.py'` and `pkill -f '[c]onsole.py'`;

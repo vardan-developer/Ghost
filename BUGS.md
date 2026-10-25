@@ -1619,3 +1619,296 @@ Already detailed:
 - **Unbounded growth:** A4/A5, B1/B2/B4, C1/C2/C4, D3/D5/D6, E3, F8/F10/F12, H1/H3.
 
 The smallest high-impact set I would apply first: **A4/A5** (stop phantom/pending growth), **B1/B2/B3** (pending cleanup + send timeout), **C1/C2/C3/C4** (history cap/truncate, file modes, no persist-on-ping), **F1** (admin auth/token redaction), **F5** (XSS escaping), **F3** (CSRF Origin check), **A1/A6** (close old/revoked connections), and **D5** (stream idle timeout/heartbeat + cap). These are all localized changes and do not require broad refactors.
+
+# Additional focused review — 2026-10-25
+
+Historical status at initial review: all findings below were unfixed.
+Subsequent local changes address findings 3–7 in source; see BACKLOG.md for
+current status and verification limits. The original evidence is preserved.
+This review inspected transfer plumbing, command status and test entry points;
+it is not a fresh exhaustive audit of both Android apps and all server routes.
+
+1. **P1 — `files get` loses all payload bytes** (`server/daemon.py:460-471`).
+   The binary handler processes only `type=frame`. Download chunks use
+   `type=file_chunk`, so they are discarded. The text handler has no
+   `file_start`/`file_end` branches either. `FileTransfer.sendFile` returns only
+   path, byte/chunk counts and SHA-256, not contents. Consequently successful
+   command status cannot produce a downloaded file. Add a receive sink and
+   operator delivery path, bind it to device/command, and verify bytes/hash.
+   An isolated invocation of the actual binary handler with a synthetic chunk
+   confirmed it created no receiver state and called no cache sink.
+
+2. **P1 — CLI `files put` does not upload** (`server/ghostctl.py:215-219`).
+   `build_args` treats every files command as pass-through. A request such as
+   `files put /sdcard/test.txt /tmp/source.txt` becomes a plain `op=command`
+   RPC, whose device handler waits for chunks that nobody sends. There is no
+   CLI source-file reader or admin upload operation invoking `push_file` for
+   this path. The same request occurs in e2e. Implement the upload path with
+   clear source/destination semantics, then verify a complete round trip.
+   Reproduced the exact emitted request with a mocked RPC, without contacting
+   the daemon or reading source contents.
+
+3. **P1 — shell can deadlock on stderr**
+   (`client-main/app/src/main/java/com/tg/ghostd/CommandHandler.kt:618-619`).
+   stdout is read to EOF before stderr is drained. A command that writes more
+   than the stderr pipe capacity blocks writing; stdout never reaches EOF
+   while that child is alive. The worker and child remain after the server
+   command timeout. Drain both concurrently or merge them if separate output
+   is unnecessary; add a bounded process lifetime and output size. Static
+   finding; not executed on Android.
+
+4. **P2 — explicit operation failures get a successful wire envelope**
+   (`client-main/app/src/main/java/com/tg/ghostd/CommandHandler.kt:137-139`).
+   `sidekickSend` converts link exceptions into `{ok:false,error:...}`, and
+   the sidekick router also returns explicit failures. `execute` wraps all
+   these returns with `ok=true,status=ok`; daemon result handling trusts that
+   outer value. A failed tap/type can therefore exit CLI zero and enter
+   history as successful. Propagate explicit operation errors while retaining
+   their diagnostic payload. Static cross-component finding.
+
+5. **P2 — CLI device names/prefixes do not work for commands or update**
+   (`server/ghostctl.py:211,218`). `resolve_device` is called only for rename.
+   Both command and OTA RPCs send `ns.device` literally, but daemon approval
+   and connection maps require exact IDs. `-d "Pixel 10a" status` is rejected
+   instead of targeting the named device. Resolve once before device-targeted
+   operations. Mocked CLI execution confirmed the literal name in the RPC.
+
+6. **P2 — e2e cannot run from this checkout** (`server/e2e_test.py:16,23`).
+   Every subprocess uses the original VPS's absolute directory as `cwd`.
+   That directory is absent here, so the first check raises FileNotFoundError
+   before invoking the CLI. Derive BASE from the script location. Filesystem
+   check confirmed the configured directory is absent; no device run attempted.
+
+7. **P2 — obsolete timeout cleanup can remove a new upload's temporary file**
+   (`client-main/app/src/main/java/com/tg/ghostd/FileReceiver.kt:260-265`).
+   `await` evaluates idle/overall timeout outside `lock`. After its timed latch
+   wait returns false, `onEnd` or `abortAll` can complete that transfer and
+   `prepare` can open a new transfer to the same destination. The old worker
+   can then call `fail(old)` and unconditionally delete `<dest>.part` belonging
+   to the replacement. The pending-identity guard runs only after deletion.
+   An interrupted old waiter has the same unsafe cleanup path. Guard terminal
+   state and identity before touching the shared path; make cleanup idempotent
+   or give transfers unique temp files. Static interleaving proof; not
+   reproduced on device or in JVM tests.
+
+# Unattended updates and availability review — 2026-10-25
+
+Scope: current local `AppUpdater`, `SidekickInstaller`, manifest/build settings,
+service/boot lifecycle, and daemon/CLI OTA routing. Product files were already
+being changed elsewhere during review; this review only edits the two audit
+documents. U1–U8 below remain present in the inspected source.
+
+## What is now present, and what is not proven
+
+- The main manifest now declares `UPDATE_PACKAGES_WITHOUT_USER_ACTION`.
+  Both apps target API 36, and eligible updater calls request
+  `USER_ACTION_NOT_REQUIRED` on API 31+. This corrects the previous missing
+  permission at source level; it does not establish the installed APK's state.
+- Android requires the relevant install authorization and target SDK, plus
+  self-update or the appropriate installer/update ownership. Same signing
+  identity is necessary for compatible replacement but does not alone remove
+  confirmation. The installer must still handle pending user action.
+  [Platform conditions](https://developer.android.com/reference/android/content/pm/PackageInstaller.SessionParams#setRequireUserAction(int)).
+- A new permission takes effect after that version is installed; the old
+  installer cannot use the incoming manifest to make its own transition
+  unattended. An initial owner-confirmed transition may be necessary.
+- The source provides operator-triggered single-device OTA and a bundled
+  sidekick version check at service/setup start. It has no verified fleet
+  release scheduler, durable rollout reconciliation, or working `--all update`.
+  The current CLI explicitly rejects that option rather than pretending to
+  broadcast it. No new fleet feature was implemented in this review.
+
+## U1 — P1: self-update loses its completion observer
+
+**Locations:** `AppUpdater.kt:217-245,250-308`; `BootReceiver.kt:9-20`;
+`server/daemon.py:dispatch`, `_disconnect_device`, `device_handler` hello branch.
+
+The status receiver and blocking queue exist only in the process that creates
+the session. A full self-update kills that process before installation completes;
+there is no manifest receiver for `UPDATE_STATUS` or persisted update/session
+record. `MY_PACKAGE_REPLACED` restarts the service but does not resume completion
+tracking. The daemon fails pending commands on disconnect, and a hello with a
+new `app_version` only updates device metadata. Thus an installed update can be
+reported as a failure (or timeout if the old connection was superseded first).
+The updater comment promising a success response before replacement is incorrect.
+
+**Evidence:** isolated execution of the actual current `dispatch` and
+`_disconnect_device` methods, with mocked persistence/transport, returned
+`status=error, result={error:"device disconnected"}` even after simulated
+reconnect/new-version state. This is server control-flow proof, not an actual
+Android installation. Android documents that installs normally kill the running
+process before completion; its split-install exception does not describe this
+`MODE_FULL_INSTALL` flow.
+[Process replacement](https://developer.android.com/reference/android/content/pm/PackageInstaller.SessionParams#setDontKillApp(boolean)).
+
+**Required behavior/check:** persist an update identifier, expected package and
+versionCode; retain an installing/reconnecting state and verify the installed
+version after restart. A successful self-update must finish successfully even
+without a final result from the replaced process; an unchanged version must
+not count as success. Test an actual approved-device self-update.
+
+## U2 — P1: concurrent installs consume each other's status
+
+**Locations:** `AppUpdater.kt:223-235,263-277`;
+`SidekickInstaller.kt:128-138`; `GhostService.kt:65-71`.
+
+Every `installApk` call registers a receiver for the same `ACTION_STATUS` and
+enqueues every matching broadcast. There is no `EXTRA_SESSION_ID` check or
+per-session action/URI. Different PendingIntent request codes distinguish the
+PendingIntents but do not scope receivers listening for the same action.
+Background bundled provisioning can overlap a command install even when daemon
+commands are serialized. Session A's success can make B report installed before
+B finishes; A's failure can incorrectly fail B.
+
+**Required behavior/check:** match callbacks to the owning session and package,
+and coordinate competing installations. Test two concurrent sessions with
+different results; neither waiter may consume the other's terminal event.
+Static finding; Android callback delivery was not exercised.
+
+## U3 — P1: exported install-status receiver trusts external messages
+
+**Locations:** `AppUpdater.kt:225-234,263-286`.
+
+The custom status receiver is exported and registered without a sender
+permission. It trusts status extras and can launch the supplied confirmation
+Intent. Another installed app can send a matching unprotected broadcast during
+an update, causing a false success/failure or an unintended activity launch.
+The outgoing callback's `setPackage` restricts its destination; it does not
+authenticate all incoming messages to this exported receiver.
+
+**Required behavior/check:** use a callback receiver/delivery arrangement
+protected from unrelated senders and validate session identity before consuming
+status or launching UI. Test both genuine PackageInstaller callbacks and an
+unrelated sender; the latter must have no effect. No spoofing was attempted.
+[Android broadcast protection](https://developer.android.com/develop/background-work/background-tasks/broadcasts).
+
+## U4 — P2: early failures bypass installer cleanup
+
+**Locations:** `AppUpdater.kt:217-248,250-311`.
+
+The receiver is registered before copying the APK. If `openWrite`, file reading
+or `commit` throws, only `session.close()` runs; execution never reaches the
+later try/finally that unregisters the receiver. Session creation/open/register
+failures also lack a common cleanup owner. There is no abandonment path, so a
+partially staged, uncommitted session can retain disk space. A timeout waiting
+for user action unregisters the receiver but leaves the session unresolved;
+later confirmation can install after the command has reported failure.
+
+**Required behavior/check:** cover the complete lifecycle with cleanup, abandon
+failed uncommitted sessions, and explicitly define cancellation/reconciliation
+for committed sessions. Inject a staging failure and check receiver/session
+counts and disk usage; test timeout followed by a late result. `close()` only
+releases the session object; it does not destroy staged state.
+[Session lifecycle](https://developer.android.com/reference/android/content/pm/PackageInstaller.Session).
+
+## U5 — P2: requested package and APK package are never compared
+
+**Locations:** `AppUpdater.kt:103-112,131-147,202-215,237`;
+`server/ghostctl.py:apks_cmd`, `stage_update_apk`.
+
+The source reads the archive versionName but never verifies its package name
+against the requested target. `sessionName="ghostd"` is an entry name for
+`openWrite`, not a package constraint. If a valid ghosta APK is mistakenly
+staged as ghostd.apk, `update self` can update ghosta and report target=self
+while ghostd's version is unchanged. Android still enforces signature checks
+for whichever package the APK actually contains; this finding is about wrong
+target selection, not bypassing signature verification.
+
+**Required behavior/check:** reject unreadable or mismatched package identity
+before committing; constrain the session to the expected package and check
+installed versionCode afterward. Test swapped ghosta/ghostd artifacts. Static
+finding; no wrong-package installation was attempted.
+
+## U6 — P2: bundled updates use display version as update ordering
+
+**Locations:** `SidekickInstaller.kt:93-105`; `VersionInfo.kt:12-30`;
+`AppUpdater.kt:73-84`.
+
+Bundled provisioning compares only numeric components of versionName. An APK
+with a greater versionCode but the same display name is marked up-to-date and
+never installed. Conversely, a greater display name with an older code is
+repeatedly attempted and rejected as a downgrade. Non-numeric labels are also
+collapsed to zero. versionName is display metadata; versionCode is the ordering
+field for Android package versions.
+
+**Required behavior/check:** compare installed and archive longVersionCode,
+using versionName for display. Cover higher-code/same-name and lower-code/
+higher-name cases. Static finding.
+[Android versioning](https://developer.android.com/studio/publish/versioning).
+
+## U7 — P1: indefinite dataSync FGS conflicts with Android 15+ timeout
+
+**Locations:** `GhostService.kt:46-61,75-88`; `client-main/app/build.gradle.kts:19`.
+
+The API-36 app starts a dataSync foreground service for its persistent socket,
+returns START_STICKY and has no `onTimeout(int,int)` handler. Under standard
+Android 15+ rules, this type has six background hours per 24-hour period. When
+the budget expires, failure to stop promptly causes a fatal exception; restarting
+the same service does not reset the budget. A phone left unattended can therefore
+lose the connection needed to receive an update.
+
+**Required behavior/check:** handle timeout and design the remote-management
+lifecycle around supported scheduling/management facilities appropriate to its
+actual work. Verify background budget exhaustion and recovery on an applicable
+device; do not claim that a service restart or unrelated service-type label
+solves the platform restriction. Platform/code finding, not an observed Pixel
+timeout. [FGS timeouts](https://developer.android.com/develop/background-work/services/fgs/timeout).
+
+## U8 — P1: direct boot restart uses a prohibited FGS type
+
+**Locations:** `BootReceiver.kt:13-20`; `GhostService.kt:54-58`;
+`client-main/app/build.gradle.kts:19`.
+
+The receiver starts GhostService from BOOT_COMPLETED, which immediately starts
+foreground as dataSync. Android 15+ prohibits that boot-launched type for apps
+targeting API 35+, including this API-36 build. The existing backlog's request
+to catch boot exceptions alone is insufficient: swallowing the error still
+leaves this recovery path unable to connect. This finding concerns reboot;
+it does not assert that MY_PACKAGE_REPLACED has the same boot restriction.
+
+**Required behavior/check:** implement and verify a supported post-boot
+recovery path. Reboot an enrolled Android 15+ device and confirm expected
+connectivity without relying on the disallowed boot launch. Other sidekick
+recovery paths must be tested separately. Static code + platform evidence.
+[Boot restrictions](https://developer.android.com/about/versions/15/behavior-changes-15#fgs-boot-completed).
+
+## Verification boundary
+
+No APK was built, deployed or installed; no phone command or permission-setting
+change was made. Current CLI alias resolution and rejection of `--all update`
+were checked with mocked RPC. The source manifest was XML-parsed successfully.
+The daemon disconnect case used extracted actual methods with mocked external
+effects. Android lifecycle/security cases need targeted device/emulator tests.
+Existing local edits and test files from other work were preserved. This audit
+cannot certify a fully unattended fleet rollout from source inspection alone.
+
+---
+
+# Implementation status addendum — 2026-10-25
+
+This addendum records current source status; the audit evidence above is kept
+unchanged. **Source fixes and unit tests are not device/deployment proof.**
+
+- Additional focused review findings 1–7 are addressed in source: downloads
+  carry verified bytes, CLI uploads stream through the daemon, shell pipes are
+  bounded/drained concurrently, explicit failures propagate, aliases resolve,
+  E2E paths are portable, and obsolete upload cleanup is identity-checked.
+- U1–U8 are addressed in source: self-update completion reconciles a strictly
+  greater `version_code` after reconnect; install callbacks are session/package
+  scoped with cleanup and package validation; bundled upgrades compare version
+  codes; and the persistent service uses an explicitly declared owner-authorized
+  `specialUse` foreground type rather than time-limited `dataSync`.
+- The server/console/CLI findings have implementations and regression tests for
+  enrollment, connection ownership, pending cleanup, bounded history,
+  authenticated/redacted admin operations, stream TTL/caps, broadcast results,
+  CSRF/XSS/request limits, responsive console workflows, and file/device removal.
+- Local verification at this addendum: **246 server tests, 151 ghostd tests and
+  114 ghosta tests pass; both release builds pass.** The current Kali deployment
+  and the new emulator builds have not yet been updated or run through full E2E.
+
+Still open or deployment-dependent: device-transport TLS and credential
+rotation, production file/directory permissions and TLS termination, approved-
+device pagination/cap hardening, the older camera/mic resource audit, endpoint
+cache/reconnect and localhost-link hardening, and all behavior requiring real
+PackageInstaller, keyguard, consent, reboot or long-idle verification. Do not
+mark those items closed from the unit-test result alone.

@@ -13,11 +13,12 @@ import java.security.MessageDigest
  * server already parses for media frames).
  *
  * Wire format:
- *   text:   {"type":"file_start","path":..,"dest":..,"total":N,"chunk":65536}
- *   binary: header {"type":"file_chunk","seq":i,"path":..,"len":n,"total":N} + \n + payload
- *   text:   {"type":"file_end","path":..,"bytes":N,"chunks":k,"sha256":hex}
+ *   text:   {"type":"file_start","path":..,"dest":..,"total":N,"chunk":65536,"cmd_id":..}
+ *   binary: header {"type":"file_chunk","seq":i,"path":..,"len":n,"total":N,"cmd_id":..} + \n + payload
+ *   text:   {"type":"file_end","path":..,"bytes":N,"chunks":k,"sha256":hex,"cmd_id":..}
  *
- * No size cap — seq counts up, the server concatenates in order. See
+ * Every frame carries cmd_id so the server can bind it to the outstanding
+ * `files get` command and reject chunks from a different transfer. See
  * [FileReceiver] for the reverse direction (files put).
  */
 object FileTransfer {
@@ -74,7 +75,25 @@ object FileTransfer {
      * opaque remote save-name hint echoed in the headers. Returns
      * {path, dest, bytes, chunks, sha256}.
      */
-    fun sendFile(ws: WebSocket, path: String, cmdId: String, dest: String?): JSONObject {
+    fun sendFile(ws: WebSocket, path: String, cmdId: String, dest: String?): JSONObject =
+        sendFile(
+            path, cmdId, dest,
+            sendText = { text -> ws.sendText(text) },
+            sendBinary = { data -> ws.sendBinary(data) }
+        )
+
+    /**
+     * Testable core of [sendFile]; the WebSocket overload above passes its
+     * own send methods. Kept internal so unit tests can capture every frame
+     * without a live socket.
+     */
+    internal fun sendFile(
+        path: String,
+        cmdId: String,
+        dest: String?,
+        sendText: (String) -> Unit,
+        sendBinary: (ByteArray) -> Unit
+    ): JSONObject {
         val f = File(path)
         if (!f.exists() || !f.isFile) throw Exception("no such file: $path")
         if (!f.canRead()) throw Exception("cannot read: $path")
@@ -89,7 +108,7 @@ object FileTransfer {
             .put("chunks", chunks)
             .put("cmd_id", cmdId)
         try {
-            ws.sendText(start.toString())
+            sendText(start.toString())
         } catch (e: Exception) {
             throw Exception("socket gone before file_start: ${e.message}")
         }
@@ -107,8 +126,9 @@ object FileTransfer {
                     .put("path", path)
                     .put("len", n)
                     .put("total", total)
+                    .put("cmd_id", cmdId)
                 try {
-                    ws.sendBinary(buildFrame(header, payload))
+                    sendBinary(buildFrame(header, payload))
                 } catch (e: Exception) {
                     throw Exception("socket gone at chunk $seq: ${e.message}")
                 }
@@ -124,8 +144,9 @@ object FileTransfer {
             .put("bytes", total)
             .put("chunks", seq)
             .put("sha256", sha256)
+            .put("cmd_id", cmdId)
         try {
-            ws.sendText(end.toString())
+            sendText(end.toString())
         } catch (_: Exception) {
             // socket gone after the last chunk; the result send will fail too
         }

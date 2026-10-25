@@ -41,6 +41,9 @@ object SidekickLink {
     private var input: BufferedReader? = null
     private var output: BufferedWriter? = null
 
+    /** Test-only port override (0 keeps the fixed [PORT]). */
+    @Volatile internal var portForTest: Int = 0
+
     /** Invoked (on the connecting thread) every time a NEW link is up. */
     @Volatile private var onConnected: (() -> Unit)? = null
     private var watchTimer: Timer? = null
@@ -49,28 +52,44 @@ object SidekickLink {
 
     /**
      * Send one JSON request, return the sidekick's JSON response verbatim.
-     * Reconnects once on IO failure before giving up.
+     *
+     * A connection/auth failure before the request is written is retried once
+     * (safe: the request never reached the sidekick). Once [BufferedWriter.write]
+     * and [BufferedWriter.flush] have both returned, however, the sidekick may
+     * already have executed a non-idempotent command (tap/type/unlock). Any
+     * subsequent read error is ambiguous, so close the link and fail instead
+     * of resending and executing the command twice.
      */
     fun send(request: JSONObject): JSONObject {
         val line = synchronized(lock) {
+            val payload = request.toString() + "\n"
             var response: String? = null
+            var failure: Exception? = null
             for (attempt in 0..1) {
+                var wroteRequest = false
                 try {
                     if (!aliveLocked() && !connectLocked()) {
                         throw Exception("cannot connect to sidekick at $HOST:$PORT")
                     }
                     val o = output ?: throw Exception("no link")
                     val i = input ?: throw Exception("no link")
-                    o.write(request.toString() + "\n")
+                    o.write(payload)
                     o.flush()
+                    // From here on the request may have been delivered.
+                    wroteRequest = true
                     response = i.readLine() ?: throw Exception("sidekick closed the link")
                     break
                 } catch (e: Exception) {
                     closeLocked()
-                    if (attempt == 1) throw Exception("sidekick link error: ${e.message}")
+                    failure = e
+                    if (wroteRequest) {
+                        throw Exception(
+                            "sidekick link error after request was sent; not retrying: ${e.message}"
+                        )
+                    }
                 }
             }
-            response ?: throw Exception("sidekick link error")
+            response ?: throw Exception("sidekick link error: ${failure?.message ?: "unknown"}")
         }
         return try {
             JSONObject(line)
@@ -123,14 +142,23 @@ object SidekickLink {
         synchronized(lock) { closeLocked() }
     }
 
+    /** Drop all state between JVM tests (no live sidekick in unit tests). */
+    internal fun resetForTest() {
+        synchronized(lock) {
+            closeLocked()
+            onConnected = null
+        }
+    }
+
     // ------------------------------------------------------------- internal
 
     /** Caller must hold [lock]. Connects and performs the auth handshake. */
     private fun connectLocked(): Boolean {
+        val port = portForTest.takeIf { it > 0 } ?: PORT
         val s = Socket()
         try {
             s.tcpNoDelay = true
-            s.connect(InetSocketAddress(HOST, PORT), CONNECT_TIMEOUT_MS)
+            s.connect(InetSocketAddress(HOST, port), CONNECT_TIMEOUT_MS)
             s.soTimeout = READ_TIMEOUT_MS
             val i = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.UTF_8))
             val o = BufferedWriter(OutputStreamWriter(s.getOutputStream(), Charsets.UTF_8))

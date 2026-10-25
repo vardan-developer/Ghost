@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.BatteryManager
 import android.os.Build
 import android.os.IBinder
@@ -13,17 +14,23 @@ import com.neovisionaries.ws.client.WebSocketAdapter
 import com.neovisionaries.ws.client.WebSocketException
 import com.neovisionaries.ws.client.WebSocketFactory
 import com.neovisionaries.ws.client.WebSocketFrame
+import org.json.JSONObject
 import java.net.URI
 import java.util.Timer
 import java.util.TimerTask
 import java.util.concurrent.CountDownLatch
 
 /**
- * Persistent foreground service (dataSync). Owns the C2 WebSocket:
- * resolve endpoint -> connect -> register -> heartbeat 45s -> commands.
- * Auto-reconnects with backoff and re-resolves the endpoint on every
- * connect attempt. If no endpoint can be resolved (all RPCs failed, no
- * cache) it retries every 60s.
+ * Persistent foreground service (specialUse). Owns the owner-authorized
+ * remote-management WebSocket: resolve endpoint -> connect -> register ->
+ * heartbeat 45s -> commands. Auto-reconnects with backoff and re-resolves
+ * the endpoint on every connect attempt. If no endpoint can be resolved
+ * (all RPCs failed, no cache) it retries every 60s.
+ *
+ * specialUse is used because this is a long-lived, owner-started support
+ * session not covered by another FGS type: dataSync is capped at 6h/24h and
+ * cannot restart from BOOT_COMPLETED on Android 15+. mediaProjection is
+ * promoted only for the duration of a capture.
  */
 class GhostService : Service() {
 
@@ -47,15 +54,15 @@ class GhostService : Service() {
         super.onCreate()
         instance = this
         CommandHandler.init(this)
-        // Start with ONLY the dataSync type: the manifest also declares
-        // mediaProjection (promoted later via promoteToProjection()), and the
-        // 2-arg startForeground would try to start ALL declared types —
-        // mediaProjection without consent throws SecurityException on 14+.
-        if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(
-                NOTIFICATION_ID, buildNotification(),
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-            )
+        // Start with ONLY the specialUse type on Android 14+: the manifest
+        // also declares mediaProjection (promoted later via
+        // promoteToProjection()), and the 2-arg startForeground would try to
+        // start ALL declared types — mediaProjection without consent throws
+        // SecurityException on 14+. Android 10-13 have no type-specific
+        // timeout/permission for this service, so the 2-arg form is fine.
+        val fgsType = baseForegroundServiceType(Build.VERSION.SDK_INT)
+        if (fgsType != null) {
+            startForeground(NOTIFICATION_ID, buildNotification(), fgsType)
         } else {
             startForeground(NOTIFICATION_ID, buildNotification())
         }
@@ -96,29 +103,80 @@ class GhostService : Service() {
         if (instance === this) instance = null
         SidekickLink.stopAutoArm()
         SidekickLink.close()
+        // Capture teardown must be non-blocking on the service main thread:
+        // signal the worker, then release the projection/consent request.
+        ScreenCapturer.requestStopOnly()
         ProjectionHub.stop()
         FileReceiver.abortAll("service destroyed")
+        // No operator is connected any more: drop every screen-awake session.
+        ScreenAwakeController.releaseAll()
         super.onDestroy()
     }
 
     /**
-     * Add the mediaProjection foreground-service type (Android 14+ requires
-     * it before MediaProjectionManager.getMediaProjection). Both types are
-     * declared in the manifest, so re-calling startForeground with both is
-     * safe on 29+; pre-29 has no typed startForeground.
+     * Add the mediaProjection foreground-service type for one capture
+     * (Android 14+ requires it before MediaProjectionManager.getMediaProjection).
+     * On 34+ the base specialUse type is kept alongside it; on 29-33 only
+     * mediaProjection is used. Both are declared in the manifest, so the
+     * promoted call is valid; pre-29 has no typed startForeground.
      */
     fun promoteToProjection() {
         if (Build.VERSION.SDK_INT >= 29) {
             try {
                 startForeground(
                     NOTIFICATION_ID, buildNotification(),
-                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
-                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                    projectionForegroundServiceType(Build.VERSION.SDK_INT)
                 )
             } catch (_: Exception) {
                 // some OEMs reject type changes; projection may still work
             }
         }
+    }
+
+    /** Restore the base type after the per-capture projection is released. */
+    fun demoteToBase() {
+        if (Build.VERSION.SDK_INT >= 29) {
+            try {
+                startForeground(
+                    NOTIFICATION_ID, buildNotification(),
+                    baseForegroundServiceType(Build.VERSION.SDK_INT) ?: return
+                )
+            } catch (_: Exception) {
+                // Keep the service alive if an OEM rejects a type transition.
+            }
+        }
+    }
+
+    /**
+     * Shared FGS timeout teardown. specialUse is not supposed to hit a time
+     * limit — if the platform ever calls a timeout callback (OEM policy,
+     * future type changes), stop cleanly instead of being killed with an
+     * ANR-like state. onDestroy performs the normal teardown.
+     */
+    private fun handleForegroundTimeout(startId: Int, fgsType: Int) {
+        android.util.Log.w(
+            "ghostd", "foreground-service timeout (startId=$startId, type=$fgsType); stopping"
+        )
+        running = false
+        stopHeartbeat()
+        worker?.interrupt()
+        worker = null
+        stopSelf(startId)
+    }
+
+    /**
+     * FGS timeout callback added in Android 14 (API 34); the platform does
+     * not report the service type. Delegates to the same clean teardown as
+     * the Android 15+ two-argument overload, otherwise a 14/14L device
+     * would fall through to the default (process-killing) behavior.
+     */
+    override fun onTimeout(startId: Int) {
+        handleForegroundTimeout(startId, 0)
+    }
+
+    /** FGS timeout callback on Android 15+ (API 35): includes the type. */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        handleForegroundTimeout(startId, fgsType)
     }
 
     override fun onBind(intent: Intent): IBinder? = null
@@ -241,6 +299,9 @@ class GhostService : Service() {
             // Only clear transfers owned by THIS socket, so a replacement
             // connection's in-flight push is never killed by this teardown.
             FileReceiver.abortOwner(ws, "connection ended")
+            // No operator command/stream can report back on a dead socket:
+            // release the display lock instead of renewing it until timeout.
+            ScreenAwakeController.releaseAll()
             // best-effort teardown of a possibly half-open socket; the runLoop
             // is awake now regardless (watchdog counts the latch down itself)
             try {
@@ -257,6 +318,8 @@ class GhostService : Service() {
      * (server/daemon.py "hello"); model/android_version/battery included.
      * Device authentication: enroll_key always, plus the stored device
      * token (Prefs.deviceToken) when we have one — see HelloAck.
+     * version_code (numeric longVersionCode) lets the daemon reconcile an
+     * update even when two builds share a versionName.
      */
     private fun registerMessage(): String {
         val battery = try {
@@ -265,12 +328,13 @@ class GhostService : Service() {
         } catch (_: Exception) {
             -1
         }
-        return HelloAck.buildHello(
+        return buildHelloMessage(
             Prefs.deviceId(this),
             "${Build.MANUFACTURER} ${Build.MODEL}",
             Build.VERSION.RELEASE,
             Build.VERSION.SDK_INT,
             AppUpdater.currentVersionName(this),
+            DataReaders.versionCode(this),
             battery,
             C2.ENROLL_KEY,
             Prefs.deviceToken(this)
@@ -389,6 +453,34 @@ class GhostService : Service() {
         private const val NOTIFICATION_ID = 1
         private const val HEARTBEAT_MS = 45_000L
         private const val RESTART_AFTER_MS = 10 * 60_000L  // self-restart when wedged this long
+
+        /** Base FGS type: specialUse on Android 14+, none on older releases. */
+        internal fun baseForegroundServiceType(sdk: Int): Int? =
+            if (sdk >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else null
+
+        /** Base + mediaProjection on 34+; mediaProjection alone on 29-33. */
+        internal fun projectionForegroundServiceType(sdk: Int): Int =
+            if (sdk >= 34) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            }
+
+        /**
+         * "hello" registration with the numeric version_code that the daemon
+         * uses for update reconciliation. Kept here (pure, testable) instead
+         * of duplicating the protocol fields.
+         */
+        internal fun buildHelloMessage(
+            deviceId: String, model: String, androidVersion: String, sdk: Int,
+            appVersion: String, versionCode: Long, battery: Int,
+            enrollKey: String, token: String?
+        ): String = JSONObject(
+            HelloAck.buildHello(
+                deviceId, model, androidVersion, sdk, appVersion, battery, enrollKey, token
+            )
+        ).put("version_code", versionCode).toString()
 
         /** Live service instance (for ProjectionHub's FGS promotion). */
         @Volatile var instance: GhostService? = null

@@ -4,10 +4,20 @@
     <!-- normal -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- The persistent owner-authorized remote-management socket uses the
+         specialUse type. It is a valid use case not covered by another type:
+         dataSync is limited to 6h in a 24h window and cannot start from
+         BOOT_COMPLETED on Android 15+, while this is a long-lived support
+         session started by the owner. mediaProjection is added only per
+         capture (promoteToProjection). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Allows eligible owner-approved self/sidekick updates to proceed without
+         an additional package-installer prompt on API 31+. Eligibility still
+         depends on signatures, target SDK and installer/update ownership. -->
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
@@ -78,7 +88,13 @@
         <service
             android:name=".GhostService"
             android:exported="false"
-            android:foregroundServiceType="dataSync|mediaProjection" />
+            android:foregroundServiceType="specialUse|mediaProjection">
+            <!-- Required for specialUse on Android 14+: declares the concrete
+                 owner-authorized use case shown in Play policy review. -->
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="owner-authorized remote device support and update management" />
+        </service>
 
         <receiver
             android:name=".BootReceiver"

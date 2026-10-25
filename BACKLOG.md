@@ -4,15 +4,15 @@ This is the working handoff for the next machine/session. Read `AGENTS.md` for
 layout and build commands. Keep this file factual: distinguish implemented,
 tested, deployed and merely designed.
 
-Last updated: 2026-10-25.
+Last updated: 2026-10-26.
 
 ## Current state
 
-- Physical test phone: **Pixel 10a**, approved and controllable.
-- Phone currently reports **ghostd 0.3.8**. Working tree is **ghostd 0.3.9 /
-  ghosta 0.1.9**; these builds have not completed deployment or full e2e.
-- **52 main-app and 16 sidekick unit tests pass after the transfer-integrity
-  edits**; Python compile checks pass. Full on-device e2e has not been rerun.
+- Physical test phone: **Pixel 10a**, approved and controllable. It must remain untouched during current local/emulator work.
+- Phone currently reports **ghostd 0.3.8**. Working tree is **ghostd 0.4.0 / ghosta 0.2.0**.
+- **Local full verification now passes:** 246 server unit tests + `py_compile`, 151 ghostd unit tests, 114 ghosta unit tests, and release builds.
+- **Emulator:** Initial 0.3.9/0.1.9 build installed; basic command and accessibility screenshot path passed. Current 0.4.0/0.2.0 builds are not yet installed or device-e2e tested.
+- **Kali server:** Not yet updated or restarted.
 - The original e2e run passed 17/22 checks. Failures were:
   - incorrect test invocation for volume (test fixed to `volume set media N`);
   - interrupted/wedged file push and dependent file get;
@@ -21,31 +21,23 @@ Last updated: 2026-10-25.
 - New `device info`, `status`, `sms recent`, `loc once`, `hide`, `unhide`,
   `files abort`, and `restart` verbs exist in the working tree, but most still
   need on-device verification. `sms recent` is implemented, **not yet proven**
-  on the Pixel. Do not describe SMS send, contacts, call log or auto-destroy as
-  implemented.
-- Console is reachable on port 9443 after the firewall change. Password comes
+  on the Pixel. SMS send, contacts and call-log readers remain unimplemented.
+  Remove Device is implemented in source but its two-app uninstall flow still
+  needs emulator verification.
+- Console is implemented with dashboard, settings, file management, CSRF
+  protection, admin auth, and secure password handling. Password comes
   from gitignored `server/.env`; never commit it.
 - Device rename works in daemon, CLI and console. `-d` accepts a full ID, an
   unambiguous ID prefix, or a device name.
 
 ## Immediate next steps — do these before new features
 
-1. Inspect `git status` and the latest commit. The transfer-integrity change
-   and the OTA path fix are implemented and unit-tested; do not start a
-   parallel rewrite.
-2. Re-run sidekick tests/build, `refreshSidekickAsset`, main tests/build, and
-   Python `py_compile`. Confirm no runtime logs or secrets are staged.
-3. Deploy ghosta 0.1.9, then ghostd 0.3.9 to the test phone. Keep the phone
-   unlocked for this deployment if consent automation is not yet verified.
-   Verify actual versions through `device info` and `sidekick status`.
-4. Verify upload integrity repeatedly with both a small file and an APK:
-   normal put/get, interrupted push then retry to the **same path**, retry to a
-   different path, disconnect/reconnect during push, `files abort`, and
-   `restart`. Compare SHA-256, not only byte counts.
-5. Run `server/e2e_test.py` and record the new pass/fail result here. Re-test
-   `sms recent 5`, `loc once`, screen shot/live, files, UI verbs and restart.
-6. Complete consent-per-capture behavior below, then repeat screen tests with
-   the phone unlocked and locked. Do not keep a persistent projection.
+1. Review all current source changes and ensure no runtime logs or secrets are staged.
+2. Push to GitHub (user handles unless explicitly asked), then pull and restart on Kali.
+3. Install the new current builds on the emulator and verify the basic command and screenshot paths.
+4. Run the full device e2e suite against the emulator or when the Pixel is explicitly cleared for use. Record results here.
+5. Verify the implemented consent-per-capture behavior on the emulator with
+   locked and unlocked states. Do not keep a persistent projection.
 
 ## P0 — correctness / recovery bugs
 
@@ -274,15 +266,16 @@ confirmed fixes, in order:
    timeout must cover the full push+install flow, and non-command ops should
    return nonzero on RPC errors instead of tracebacks/false success.
 
-See `BUGS.md` for exact functions, failure sequences and the smaller hardening
-items. These are follow-up fixes after the current Android release verification;
-do not rewrite the daemon all at once.
+See `BUGS.md` for exact functions and failure sequences. These server/console/
+CLI fixes are now implemented and unit-tested locally; Kali deployment and
+integration verification remain pending. TLS, production permissions and the
+explicitly listed hardening gaps remain open.
 
-## Next feature after stabilization: keep the screen awake during control
+## Keep the screen awake during control — source implemented
 
-Not implemented yet; the user explicitly said not to start it during handoff.
-
-Implement in **ghostd**, not ghosta (ghostd already has wake-lock permission):
+Implemented in **ghostd**, not ghosta, with unit tests; emulator verification is
+pending. The controller expires after two minutes without command/frame
+activity and releases on the last session, disconnect or service destruction.
 
 - While an operator command/session is active, acquire a bounded screen wake
   lock so consent/UI automation does not race the display turning off.
@@ -296,10 +289,117 @@ Implement in **ghostd**, not ghosta (ghostd already has wake-lock permission):
 
 ## Feature/verification backlog
 
+### Additional review findings — 2026-10-25 (status rechecked)
+
+Update follow-up: the local main manifest now declares
+`UPDATE_PACKAGES_WITHOUT_USER_ACTION`; the earlier missing-permission finding
+is **addressed in source, deployment unverified**. Both apps target API 36 and
+`AppUpdater.installApk` requests `USER_ACTION_NOT_REQUIRED` on API 31+ when
+eligible. The current CLI resolves update device aliases, uses a longer update
+RPC timeout, and explicitly rejects `--all update`. These local changes do not
+prove that the installed phone has them or that a full update succeeds.
+See the unattended-update audit below before claiming fleet readiness.
+
+Focused review of file-transfer plumbing, command results and test entry points;
+details and verification limits are in the final review section of `BUGS.md`.
+
+- **P1: Downloads are discarded.** `daemon.py:on_device_binary` ignores
+  `file_chunk`, and its text handler ignores `file_start`/`file_end`.
+  `FileTransfer.sendFile` returns metadata only, so `files get` reports success
+  without delivering file contents to the operator.
+- **P1: CLI uploads never stream.** `ghostctl.py` passes `files put` through as
+  a plain command; it never reads the source or invokes `Daemon.push_file`.
+  The current e2e upload therefore cannot complete even with a healthy receiver.
+- **Shell deadlock — source fix present, not retested in this review:** stdout
+  and stderr now drain separately and execution/output are bounded.
+- **Failed operation envelopes — source fix present, not device-tested:**
+  `resultEnvelope` now propagates explicit payload `ok:false`.
+- **Device aliases — addressed in current CLI:** command/update paths now
+  resolve IDs; mocked update-by-name invocation passed in this review.
+- **E2E directory — source fix present:** `BASE` now derives from `__file__`.
+  The suite still needs a real device run.
+- **Late `.part` cleanup — source fix present, not retested in this review:**
+  terminal-state and pending-identity guards now protect replacement uploads.
+
+Verification: isolated Python mocks reproduced raw name forwarding and the
+non-streaming upload request; the actual daemon binary handler discarded a
+synthetic download chunk; the hardcoded e2e directory was confirmed absent.
+Android findings are static code findings; no device commands or deployment
+were performed and Android tests were not rerun.
+
+### Unattended-update audit — 2026-10-25 (source addressed; emulator verification pending)
+
+**User-reported idle disconnect — diagnosis pending:** the phone sometimes
+appears to stop the service after sleeping. This is an observed loss of
+availability, not yet proof that the process/service was killed. Check elapsed
+time, charging state, whether screen-on alone restores connectivity, actual
+process/service state, battery-optimization exemption and timestamped lifecycle/
+WebSocket logs. Doze/network suspension is a candidate when the device is idle
+and unplugged; the wizard requests an exemption but its current grant is unknown.
+The socket heartbeat is a regular `Timer`; the CPU wake lock is capture-scoped,
+so the heartbeat is not a guaranteed wakeup during device sleep. The tracked
+reconnect/local-beacon defects may delay recovery. U7's Android 15+ cumulative
+dataSync runtime limit is another candidate; it must not be blamed for every
+screen-off disconnect without timing/log evidence. No phone state was inspected
+or changed for this symptom report.
+
+**Verdict: eligible unattended installs are supported by the current source,
+but reliable end-to-end automatic updates are not verified or release-ready.**
+The permission in a new APK does not retroactively grant it to the old
+installer process; the transition from an older installation may still need
+one owner-confirmed update. Android can require user action when eligibility
+conditions are not met. No new build, installation or phone command was run.
+
+New findings (U1–U8 in `BUGS.md` have evidence, locations and acceptance checks; source is now addressed and unit-tested, but emulator verification is pending):
+
+- **U1 / P1 — self-update completion is lost across process replacement.**
+  `AppUpdater` waits on a dynamically registered receiver in the process being
+  replaced. The daemon treats its disconnect as a command error and does not
+  reconcile the update with the new version after reconnect. Persist update
+  identity/expected version and confirm installation after restart.
+- **U2 / P1 — install status is not scoped to a session.** All concurrent
+  installer calls listen to `UPDATE_STATUS` and accept every status. Background
+  bundled provisioning can overlap an operator install, allowing one install's
+  success/failure to complete both waiters. Validate session identity.
+- **U3 / P1 — install status receiver accepts untrusted broadcasts.** It is
+  exported without sender protection and trusts supplied status/intent extras.
+  Protect callback delivery and validate session identity before acting.
+- **U4 / P2 — failed staging leaks the receiver and installer session.**
+  Write/commit errors bypass receiver cleanup; `close()` does not abandon a
+  staged session. Cover the whole session lifecycle with cleanup and explicitly
+  abandon failed uncommitted sessions; define timeout handling for pending ones.
+- **U5 / P2 — update target is not validated against APK package identity.**
+  `sessionName` only labels staged bytes. A ghosta APK mistakenly staged as
+  ghostd can install the wrong target and report self-update success. Validate
+  the expected package before creating/committing a session.
+- **U6 / P2 — bundled upgrades compare versionName, not versionCode.** A higher
+  versionCode with the same display version is skipped as up-to-date. Compare
+  installed/archive version codes; retain versionName only for display.
+- **U7 / P1 — persistent dataSync service exceeds Android 15+ runtime limits.**
+  API-36 `GhostService` runs indefinitely without `onTimeout`; standard Android
+  15+ rules allow six background hours per 24 hours for this service type.
+  Handle timeout and use a supported background/management lifecycle.
+- **U8 / P1 — reboot recovery starts a prohibited service type on Android 15+.**
+  `BOOT_COMPLETED` starts the dataSync FGS directly. Catching the exception alone
+  does not restore connectivity; use and verify a supported recovery path.
+
+Verification this review: mocked current CLI confirmed update alias resolution
+and explicit bulk-update rejection; XML parsing confirmed the permission;
+isolated execution of actual daemon dispatch/disconnect methods reproduced an
+update error despite simulated reconnect/new-version state. Android findings
+are static code + official platform-documentation checks, not on-device proof.
+
+Before marking unattended updates verified: owner-approved test upgrades of
+both packages using the intended signing identity; confirm eligible installs
+need no dialog, correct versionCode after reconnect, accurate failure reporting,
+session isolation, failed-stage cleanup, and reachability after reboot and the
+Android 15+ background runtime limit. This is a verification gate, not approval
+to start new fleet features during release stabilization.
+
 - Verify `sms recent [N]` and its permission/error path on the Pixel. SMS send
   is not implemented. Contacts and call-log readers are not implemented.
-- Implement or remove CLI/console stubs that still reach `unknown action`
-  (`destroy`, `ping`, and any others found by e2e).
+- **Implemented:** obsolete top-level `ping` stub removed; `destroy` now backs
+  the explicit `remove <device>` flow; `--all update` is rejected.
 - Camera test requires the phone's global **Camera access** toggle enabled.
   Return the actionable error already added for `CAMERA_DISABLED`.
 - Location may legitimately return no fix when location/services are off; e2e
@@ -309,11 +409,15 @@ Implement in **ghostd**, not ghosta (ghostd already has wake-lock permission):
 - Consider accessibility-based low-rate live frames only after still capture
   and current live projection are stable. Do not promise invisible live capture.
 
-## Web console overhaul (backlog only — not started)
+## Web console status (source implemented; device verification pending)
 
-The current console is functional but difficult to use. After device stability
-is verified, redesign it as an operator dashboard rather than a collection of
-raw command forms:
+The console has been redesigned as an operator dashboard with device cards,
+search/filter, grouped actions, settings, file management, and safe remove.
+It includes CSRF protection, password handling, admin auth, and non-loopback HTTP
+refusal unless overridden. Verify on a phone-sized viewport and desktop, and
+ensure no credentials leak in history or logs.
+
+Implemented features:
 
 - Responsive device cards/table with assigned name, model, online/approval
   state, app/sidekick versions, battery, IP and last-seen age.
@@ -335,11 +439,11 @@ raw command forms:
 ## Documentation / release checklist
 
 - [ ] All current changes committed; no daemon/console logs or secrets staged.
-- [ ] Unit tests and Python compile checks pass after final edits.
+- [x] Unit tests and Python compile checks pass after final edits.
 - [ ] ghosta and ghostd versions staged match the tested builds.
 - [ ] Physical phone runs those versions and reconnects after update.
 - [ ] Full e2e result recorded above; negatives and skipped checks noted.
-- [ ] README command list matches actual implemented verbs and limitations.
+- [x] README command list matches actual implemented verbs and limitations.
 - [ ] `AGENTS.md`, this backlog and `BUGS.md` updated for design/lifecycle
   changes and newly confirmed audit findings.
 - [ ] User handles GitHub push unless explicitly asking the agent to push.

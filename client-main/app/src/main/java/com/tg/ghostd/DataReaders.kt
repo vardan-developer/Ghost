@@ -159,6 +159,22 @@ object DataReaders {
 
     // ----------------------------------------------------------- device info
 
+    /**
+     * Numeric version code of this app. longVersionCode on API 28+ (it is a
+     * long there); the deprecated int otherwise. -1 when unreadable.
+     */
+    fun versionCode(ctx: Context): Long = try {
+        val info = ctx.packageManager.getPackageInfo(ctx.packageName, 0)
+        if (Build.VERSION.SDK_INT >= 28) {
+            info.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            info.versionCode.toLong()
+        }
+    } catch (_: Exception) {
+        -1L
+    }
+
     /** `device info` — stable, human-readable facts for the operator. */
     fun deviceInfo(ctx: Context): JSONObject {
         val bm = ctx.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
@@ -190,6 +206,7 @@ object DataReaders {
                 ""
             })
             .put("app_version", AppUpdater.currentVersionName(ctx))
+            .put("version_code", versionCode(ctx))
             .put("sidekick_version", AppUpdater.installedVersionName(ctx, AppUpdater.SIDEKICK_PACKAGE))
             .put("icon_hidden", isHidden(ctx))
             .put("sidekick_accessibility", isSidekickAccessibilityOn(ctx))

@@ -55,6 +55,8 @@ object FileReceiver {
         internal var total = -1L
         internal var error: String? = null
         internal var sha256: String? = null
+        /** Set once the transfer has succeeded or been failed/superseded. */
+        internal var terminal = false
         internal var lastActivity = System.currentTimeMillis()
         internal val digest = MessageDigest.getInstance("SHA-256")
     }
@@ -215,6 +217,7 @@ object FileReceiver {
                 return
             }
             t.sha256 = got
+            t.terminal = true
             t.latch.countDown()
             pending = null
         }
@@ -258,11 +261,19 @@ object FileReceiver {
 
     /** Caller holds [lock]. */
     private fun failLocked(t: Transfer, msg: String) {
+        // Idempotent and identity-checked: an obsolete waiter (timeout or
+        // interruption) must not fail a transfer that already completed or
+        // was superseded. Only the live slot may delete its .part file, so a
+        // replacement transfer on the same path is never disturbed.
+        if (t.terminal) return
+        t.terminal = true
         closeStream(t)
-        t.temp.delete()
+        if (pending === t) {
+            t.temp.delete()
+            pending = null
+        }
         t.error = msg
         t.latch.countDown()
-        if (pending === t) pending = null
     }
 
     private fun closeStream(t: Transfer) {

@@ -6,48 +6,97 @@ import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 
 /**
- * Invisible helper activity: pops the system MediaProjection consent dialog
- * and hands the grant to [ProjectionHub], then finishes immediately.
+ * Invisible helper Activity that obtains a MediaProjection consent result for
+ * one capture. The request token is carried in [ProjectionHub.EXTRA_TOKEN] and
+ * returned with the result so [ProjectionHub] can reject stale grants.
  *
- * Started from the service context when a capture verb needs a projection
- * grant and none exists yet. The consent dialog is normally auto-tapped by
- * the sidekick (ghosta) accessibility service; until that exists a human
- * taps it. Needs the app to be allowed to draw over other apps (overlay
- * permission) for reliable background activity starts on Android 10+.
+ * There is no persistent projection: the operator must consent for every
+ * shot/stream. If this Activity is destroyed without producing a result, it
+ * cancels the matching request so the capture fails fast instead of hanging.
  */
 class ScreenCaptureActivity : Activity() {
 
+    private var token: Long = 0L
+    private var resultSent = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        token = savedInstanceState?.getLong(ProjectionHub.EXTRA_TOKEN)
+            ?: intent?.getLongExtra(ProjectionHub.EXTRA_TOKEN, 0L)
+            ?: 0L
+        if (token == 0L) {
+            Log.w(TAG, "missing projection request token")
+            finish()
+            return
+        }
+        // After a configuration change the pending system dialog's result is
+        // delivered to the recreated instance; do not stack a second request.
+        if (savedInstanceState == null) requestConsent()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putLong(ProjectionHub.EXTRA_TOKEN, token)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun requestConsent() {
+        val mpm = getSystemService(MediaProjectionManager::class.java)
+        if (mpm == null) {
+            Log.w(TAG, "MediaProjectionManager unavailable")
+            cancelGrant()
+            finish()
+            return
+        }
         try {
-            val mpm = getSystemService(MediaProjectionManager::class.java)
             // API 34+: request the WHOLE DISPLAY directly — the classic
             // intent shows an app picker first (no "Entire screen" option on
-            // some Android 14+/16 builds), which nothing can auto-tap
-            // reliably and single-app casts capture only our own window.
+            // some Android 14+/16 builds), and single-app casts capture only
+            // our own window.
             val intent = if (Build.VERSION.SDK_INT >= 34) {
                 mpm.createScreenCaptureIntent(
-                    MediaProjectionConfig.createConfigForDefaultDisplay())
+                    MediaProjectionConfig.createConfigForDefaultDisplay()
+                )
             } else {
                 mpm.createScreenCaptureIntent()
             }
-            startActivityForResult(intent, REQ)
+            startActivityForResult(intent, REQUEST_CODE)
         } catch (e: Exception) {
-            ProjectionHub.onGrant(0, null)
+            Log.w(TAG, "cannot request projection consent: ${e.message}")
+            cancelGrant()
             finish()
         }
     }
 
+    @Suppress("DEPRECATION")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        if (requestCode == REQ) {
-            ProjectionHub.onGrant(if (resultCode == RESULT_OK) resultCode else 0, data)
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_CODE) return
+        resultSent = true
+        if (resultCode == RESULT_OK && data != null) {
+            ProjectionHub.onGrant(token, resultCode, data)
+        } else {
+            // User dismissed/denied the consent sheet.
+            ProjectionHub.onGrant(token, resultCode, null)
         }
         finish()
     }
 
-    companion object {
-        private const val REQ = 4242
+    override fun onDestroy() {
+        super.onDestroy()
+        if (!resultSent && !isChangingConfigurations) cancelGrant()
+    }
+
+    private fun cancelGrant() {
+        resultSent = true
+        ProjectionHub.onGrantCancelled(token)
+    }
+
+    private companion object {
+        const val TAG = "GhostCaptureActivity"
+        const val REQUEST_CODE = 0x5C7
     }
 }

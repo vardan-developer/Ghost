@@ -7,6 +7,15 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- Owner-setup capability for the decommission path ONLY. After ghostd is
+         removed this accessibility service must open its own system uninstall
+         sheet from the background; Android blocks background activity starts
+         without an exemption, and "Display over other apps" is that exemption.
+         It is requested during owner setup and never obtained or bypassed at
+         runtime: `decommission prepare` fails with self_uninstall_blocked when
+         it is not granted, before ghostd starts its own removal. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <application
         android:allowBackup="false"
         android:icon="@drawable/ic_launcher"

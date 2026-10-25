@@ -6,6 +6,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 
 /**
@@ -17,11 +18,44 @@ import org.junit.Test
  */
 class MediaBusTest {
 
+    /** Screen-awake lock is injected so stream sessions are observable here. */
+    private class FakeAwakeLock : ScreenAwakeController.Lock {
+        var held = false
+        var releases = 0
+
+        override fun acquire(timeoutMs: Long): Boolean {
+            held = true
+            return true
+        }
+
+        override fun release() {
+            releases++
+            held = false
+        }
+    }
+
+    private val awakeLock = FakeAwakeLock()
+    private var now = 1_000L
+    private var renewTick: (() -> Unit)? = null
+
+    @Before
+    fun setUpAwake() {
+        ScreenAwakeController.releaseAll()
+        ScreenAwakeController.lockSource = { awakeLock }
+        ScreenAwakeController.scheduler = ScreenAwakeController.Scheduler { _, task ->
+            renewTick = task
+            AutoCloseable { renewTick = null }
+        }
+        ScreenAwakeController.clock = { now }
+    }
+
     @After
     fun cleanup() {
         MediaBus.forceEnd(MediaBus.SOURCE_SCREEN)
         MediaBus.forceEnd(MediaBus.SOURCE_CAM)
         MediaBus.forceEnd(MediaBus.SOURCE_MIC)
+        ScreenAwakeController.releaseAll()
+        ScreenAwakeController.resetHooks()
     }
 
     private fun busyMessage(e: Exception): String = e.message ?: ""
@@ -109,5 +143,87 @@ class MediaBusTest {
         val r = ScreenCapturer.stop()
         assertEquals("screen", r.optString("stopping"))
         assertNull(MediaBus.activeSource)
+    }
+
+    @Test
+    fun `a stream opens one screen-awake session and end releases it`() {
+        MediaBus.begin(MediaBus.SOURCE_SCREEN, null, null)
+        assertEquals(1, ScreenAwakeController.activeCount())
+        assertTrue(awakeLock.held)
+
+        MediaBus.end(MediaBus.SOURCE_SCREEN)
+        assertEquals(0, ScreenAwakeController.activeCount())
+        assertFalse(awakeLock.held)
+    }
+
+    @Test
+    fun `end of another source never releases the stream session`() {
+        MediaBus.begin(MediaBus.SOURCE_SCREEN, null, null)
+        MediaBus.end(MediaBus.SOURCE_CAM)
+        assertEquals(1, ScreenAwakeController.activeCount())
+        assertTrue(MediaBus.isActive(MediaBus.SOURCE_SCREEN))
+
+        MediaBus.end(MediaBus.SOURCE_SCREEN)
+        assertEquals(0, ScreenAwakeController.activeCount())
+    }
+
+    @Test
+    fun `frames refresh the stream session so it survives the idle cap`() {
+        MediaBus.begin(MediaBus.SOURCE_SCREEN, null, null)
+
+        now += ScreenAwakeController.IDLE_TIMEOUT_MS - 1
+        MediaBus.sendFrame("screen-live", byteArrayOf(1, 2, 3))   // activity
+
+        now += ScreenAwakeController.IDLE_TIMEOUT_MS - 1
+        renewTick?.invoke()
+        assertEquals(1, ScreenAwakeController.activeCount())
+        assertTrue(awakeLock.held)
+        assertTrue(MediaBus.isActive(MediaBus.SOURCE_SCREEN))
+
+        MediaBus.end(MediaBus.SOURCE_SCREEN)
+        assertEquals(0, ScreenAwakeController.activeCount())
+    }
+
+    @Test
+    fun `a stalled stream session idle-expires but keeps the capture slot`() {
+        MediaBus.begin(MediaBus.SOURCE_SCREEN, null, null)
+
+        now += ScreenAwakeController.IDLE_TIMEOUT_MS
+        renewTick?.invoke()
+
+        // screen-awake released; the stream/CPU lock are a separate concern
+        assertEquals(0, ScreenAwakeController.activeCount())
+        assertFalse(awakeLock.held)
+        assertTrue(MediaBus.isActive(MediaBus.SOURCE_SCREEN))
+
+        // frames after the expiry cannot resurrect the session
+        MediaBus.sendFrame("screen-live", byteArrayOf(1))
+        assertEquals(0, ScreenAwakeController.activeCount())
+        assertFalse(awakeLock.held)
+
+        MediaBus.end(MediaBus.SOURCE_SCREEN)
+        assertNull(MediaBus.activeSource)
+    }
+
+    @Test
+    fun `stale end and forceEnd from an older generation are no-ops`() {
+        val first = MediaBus.begin(MediaBus.SOURCE_SCREEN, null, null)
+        MediaBus.forceEnd(MediaBus.SOURCE_SCREEN)
+        assertEquals(0, ScreenAwakeController.activeCount())
+
+        val second = MediaBus.begin(MediaBus.SOURCE_SCREEN, null, null)
+        assertTrue(second > first)
+
+        // A wedged predecessor finally unwinds: it must not tear down the
+        // newer stream or its screen-awake session.
+        MediaBus.end(MediaBus.SOURCE_SCREEN, first)
+        MediaBus.forceEnd(MediaBus.SOURCE_SCREEN, first)
+        assertTrue(MediaBus.isActive(MediaBus.SOURCE_SCREEN))
+        assertEquals(1, ScreenAwakeController.activeCount())
+        assertTrue(awakeLock.held)
+
+        MediaBus.end(MediaBus.SOURCE_SCREEN, second)
+        assertNull(MediaBus.activeSource)
+        assertEquals(0, ScreenAwakeController.activeCount())
     }
 }

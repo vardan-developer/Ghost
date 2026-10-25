@@ -5,7 +5,13 @@ history.json
 __pycache__/
 # secrets — never commit
 enroll.key
+admin.key
+console.pass
 .env
 last-screenshot.png
+# Browser uploads are temporary runtime data.
+uploads/
+# Corrupt state is preserved for operator recovery.
+*.bad
 # APK store for `update` pushes — never commit binaries
 apks/

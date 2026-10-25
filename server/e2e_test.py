@@ -7,13 +7,16 @@ prints a pass/fail report. Pure server-side (uses ghostctl.py's rpc).
 Usage: python3 e2e_test.py <device_id>
 """
 
+import base64
+import hashlib
 import json
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 DEV = sys.argv[1] if len(sys.argv) > 1 else sys.exit("usage: e2e_test.py <device_id>")
-BASE = "/home/admin/code/hack/projects/ghostctl/server"
+BASE = Path(__file__).resolve().parent
 
 
 def run(verb, args=None, wait=30):
@@ -40,6 +43,21 @@ def check(name, verb, args=None, wait=30, validate=None):
         ok, note = validate(res)
     results.append((name, ok, f"{dt:.1f}s", note if not ok else (note or "ok")))
     print(f"{'PASS' if ok else 'FAIL':4}  {name:28} {dt:5.1f}s  {note if not ok else ''}")
+    return ok
+
+
+def device_streams():
+    """Cached live streams for DEV, or None when the listing failed."""
+    p = subprocess.run(["python3", "ghostctl.py", "streams"],
+                       capture_output=True, text=True, cwd=BASE, timeout=30)
+    try:
+        resp = json.loads(p.stdout)
+    except json.JSONDecodeError:
+        return None
+    if resp.get("ok") is not True:
+        return None
+    return [s for s in (resp.get("streams") or [])
+            if s.get("device_id") == DEV]
 
 
 # ------------------------------------------------------------------ system
@@ -60,21 +78,43 @@ if orig_media is not None:
 check("wake", "wake", [], wait=15)
 
 # ------------------------------------------------------------------ files
+SOURCE = Path(__file__).resolve()
+source_bytes = SOURCE.read_bytes()
+source_sha = hashlib.sha256(source_bytes).hexdigest()
+
+
+def validate_put(r):
+    if not isinstance(r, dict):
+        return False, str(r)[:80]
+    if r.get("bytes") != len(source_bytes):
+        return False, f"bytes={r.get('bytes')} expected {len(source_bytes)}"
+    if str(r.get("sha256", "")).lower() != source_sha:
+        return False, f"sha256={str(r.get('sha256'))[:16]} expected {source_sha[:16]}"
+    return True, ""
+
+
 check("files ls", "files", ["ls", "/sdcard"],
       validate=lambda r: (isinstance(r, list) and len(r) >= 0, "") if isinstance(r, list) else (False, str(r)[:60]))
 check("files put", "files", ["put", "/sdcard/e2e-test.txt", __file__],
-      validate=lambda r: (isinstance(r, dict) and r.get("bytes", 0) > 0, str(r)[:60]))
+      validate=validate_put)
 ok, res, dt = run("files", ["get", "/sdcard/e2e-test.txt"])
-got = None
-if ok and isinstance(res, dict) and res.get("b64"):
-    import base64
+got_bytes = None
+if ok and isinstance(res, dict) and isinstance(res.get("b64"), str):
     try:
-        got = base64.b64decode(res["b64"]).decode(errors="replace")
+        got_bytes = base64.b64decode(res["b64"])
     except Exception:
-        got = None
-results.append(("files get+verify", ok and got is not None and "e2e-test.py" in got,
-                 f"{dt:.1f}s", "ok" if got and "e2e-test.py" in got else f"got={str(got)[:60]}"))
-print(f"{'PASS' if (ok and got and 'e2e-test.py' in got) else 'FAIL':4}  files get+verify")
+        got_bytes = None
+get_ok = (
+    ok and isinstance(res, dict) and got_bytes == source_bytes
+    and str(res.get("sha256", "")).lower() == source_sha
+    and res.get("bytes") == len(source_bytes))
+get_note = "ok"
+if not get_ok:
+    get_note = (f"bytes={res.get('bytes') if isinstance(res, dict) else '?'} "
+                f"sha256={str(res.get('sha256'))[:16] if isinstance(res, dict) else '?'}")
+results.append(("files get+verify", get_ok, f"{dt:.1f}s", get_note))
+print(f"{'PASS' if get_ok else 'FAIL':4}  files get+verify            {dt:5.1f}s  "
+      f"{'' if get_ok else get_note}")
 
 # ------------------------------------------------------------------ UI
 check("ui dump", "ui", ["dump"],
@@ -113,17 +153,30 @@ check("mic record 3s", "mic", ["record", "3"], wait=45,
       validate=lambda r: (isinstance(r, dict) and (r.get("bytes") or r.get("b64") or r.get("m4a_b64")), str(r)[:80]))
 check("screen shot", "screen", ["shot"], wait=110,
       validate=lambda r: (isinstance(r, dict) and r.get("png_b64"), str(r)[:80]))
-check("screen live 4s", "screen", ["live", "--secs", "4", "--fps", "2", "--quality", "40"], wait=60)
+live_ok = check("screen live 4s", "screen",
+                ["live", "--secs", "4", "--fps", "2", "--quality", "40"],
+                wait=60)
 
-# streams should show cached frames after live
-ok, res, dt = run("streams")
-frames = isinstance(res, dict) and res.get("streams")
-# (list op, no device needed — rerun via rpc directly)
-p = subprocess.run(["python3", "ghostctl.py", "streams"], capture_output=True, text=True, cwd=BASE)
-sr = json.loads(p.stdout)
-n = len(sr.get("streams") or [])
-results.append(("streams relay cached", n > 0, "0.1s", f"{n} streams"))
-print(f"{'PASS' if n > 0 else 'FAIL':4}  streams relay cached      ({n} streams)")
+# After stream_end the cache must drop the stream.  Poll instead of sampling
+# once: the final frame/end/result ordering is asynchronous, so an immediate
+# listing is racy.  (Do not assert stale frames as though they were live.)
+if live_ok:
+    deadline = time.time() + 5
+    streams = device_streams()
+    while streams and time.time() < deadline:
+        time.sleep(0.2)
+        streams = device_streams()
+    n = None if streams is None else len(streams)
+    cleared = n == 0
+    note = "ok" if cleared else (
+        "stream listing failed" if n is None else f"{n} stream(s) still cached")
+    results.append(("stream cache cleared", cleared, "poll", note))
+    print(f"{'PASS' if cleared else 'FAIL':4}  stream cache cleared          "
+          f"{'' if cleared else note}")
+else:
+    results.append(("stream cache cleared", True, "skip",
+                    "skipped: live capture failed"))
+    print("SKIP  stream cache cleared          live capture failed")
 
 # ------------------------------------------------------------------ summary
 print()

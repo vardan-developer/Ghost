@@ -1,10 +1,15 @@
 package com.tg.ghostd
 
+import android.app.KeyguardManager
 import android.content.Context
+import android.os.PowerManager
+import android.os.SystemClock
 import com.neovisionaries.ws.client.WebSocket
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Executes commands received over the WebSocket and sends back the result.
@@ -61,10 +66,16 @@ object CommandHandler {
 
         // execute off the websocket thread
         Thread {
+            // Keep the display awake (and turn it on) for the whole command so
+            // a consent sheet / UI step cannot race screen-off. Balanced:
+            // the session is always ended, whatever the command does.
+            val awake = ScreenAwakeController.begin(appContext)
             val resp = try {
                 execute(msg, ws, prepared).put("cmd_id", cmdId).put("id", cmdId)
             } catch (e: Exception) {
                 error(cmdId, e.message ?: "error")
+            } finally {
+                ScreenAwakeController.end(awake)
             }
             try {
                 ws.sendText(resp.toString())
@@ -91,7 +102,7 @@ object CommandHandler {
         val args = msg.optJSONArray("args") ?: JSONArray()
         val ctx = appContext ?: throw Exception("service context not ready")
         val result: Any = when (action) {
-            "shell" -> shell(args.optString(0, "id"))
+            "shell" -> shell(args)
             "files" -> {
                 if (args.optString(0) == "put") {
                     val t = prepared ?: throw Exception(
@@ -132,11 +143,100 @@ object CommandHandler {
             "hide" -> DataReaders.setHidden(ctx, true)
             "unhide" -> DataReaders.setHidden(ctx, false)
             "restart" -> restartSelf(ctx)
+            // Owner-authorized Remove Device: ghostd + ghosta only; never
+            // personal data or other apps. See Decommission.kt.
+            "destroy" -> Decommission.destroy(ctx)
             else -> throw Exception("unknown action: $action")
+        }
+        return resultEnvelope(result)
+    }
+
+    /**
+     * Build the wire result envelope.
+     *
+     * Most actions return a plain payload and succeed. A few return a
+     * JSONObject that explicitly reports `ok:false` (sidekick link failures,
+     * sidekick router errors). Those must fail the outer envelope too;
+     * otherwise the daemon records a failed tap/type as a successful command.
+     * The original payload is kept verbatim under `result` for diagnostics.
+     */
+    internal fun resultEnvelope(result: Any): JSONObject {
+        var ok = true
+        if (result is JSONObject && result.has("ok")) {
+            ok = result.optBoolean("ok", true)
         }
         return JSONObject()
             .put("type", "result")
-            .put("status", "ok").put("ok", true).put("result", result)
+            .put("status", if (ok) "ok" else "error")
+            .put("ok", ok)
+            .put("result", result)
+    }
+
+    // ------------------------------------------------------------- unlock
+
+    /**
+     * Pure unlock decisions (JVM-tested). A PIN is only ever validated in
+     * memory here: this object never logs, returns or persists it.
+     */
+    internal object UnlockSafety {
+        const val PIN_MIN_LENGTH = 4
+        const val PIN_MAX_LENGTH = 32
+
+        /**
+         * Reasonable shape check before any keyguard input: 4-32 printable
+         * ASCII characters, no spaces/control characters. This deliberately
+         * accepts alphanumeric device passwords as well as numeric PINs.
+         */
+        fun validatePinShape(pin: String): String? {
+            if (pin.length !in PIN_MIN_LENGTH..PIN_MAX_LENGTH) {
+                return "unlock: PIN must be $PIN_MIN_LENGTH-$PIN_MAX_LENGTH characters"
+            }
+            if (pin.any { it.code < 0x21 || it.code > 0x7e }) {
+                return "unlock: PIN must be printable ASCII without spaces or control characters"
+            }
+            return null
+        }
+
+        /** KeyguardManager's two independent locked signals must both be clear. */
+        fun isUnlocked(keyguardLocked: Boolean, deviceLocked: Boolean): Boolean =
+            !keyguardLocked && !deviceLocked
+
+        /**
+         * Build a failure from a sidekick response without copying any
+         * unexpected fields (in particular, a PIN is never forwarded).
+         */
+        fun failureFrom(
+            res: JSONObject?,
+            stage: String,
+            fallback: String
+        ): JSONObject {
+            val message = res?.optString("error").orEmpty().ifBlank { fallback }
+            val out = JSONObject()
+                .put("ok", false)
+                .put("error", message)
+                .put("stage", stage)
+            if (res != null) {
+                if (res.has("typed")) out.put("typed", res.optBoolean("typed", false))
+                if (res.has("steps")) out.put("steps", res.opt("steps"))
+            }
+            return out
+        }
+    }
+
+    /**
+     * Screenshot retry decision. The accessibility screenshot API throttles
+     * at roughly 3/s; only that specific failure is worth one short retry.
+     * Any other error (no access, invalid display, timeout) goes straight to
+     * the MediaProjection fallback exactly as before.
+     */
+    internal object ScreenshotPolicy {
+        const val THROTTLE_RETRY_DELAY_MS = 500L
+
+        fun isThrottleError(error: String?): Boolean =
+            error?.lowercase()?.contains("throttl") == true
+
+        fun shouldRetryOnce(res: JSONObject): Boolean =
+            !res.optBoolean("ok", false) && isThrottleError(res.optString("error", ""))
     }
 
     // ---------------------------------------------------------------- screen
@@ -148,9 +248,19 @@ object CommandHandler {
      * projection capturer on older devices or if the sidekick is unavailable.
      */
     private fun silentScreenShot(ctx: Context, ws: WebSocket): JSONObject {
-        val viaSidekick = sidekickSend(
-            JSONObject().put("cmd", "screenshot").put("format", "png")
-        )
+        val request = JSONObject().put("cmd", "screenshot").put("format", "png")
+        var viaSidekick = sidekickSend(request)
+        // The framework throttles accessibility screenshots (~3/s). One short
+        // retry covers a back-to-back capture; every other error falls back
+        // immediately and is never retried blindly.
+        if (ScreenshotPolicy.shouldRetryOnce(viaSidekick)) {
+            try {
+                Thread.sleep(ScreenshotPolicy.THROTTLE_RETRY_DELAY_MS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+            viaSidekick = sidekickSend(request)
+        }
         if (viaSidekick.optBoolean("ok")) {
             val b64 = viaSidekick.remove("b64")
             if (b64 != null) viaSidekick.put("png_b64", b64)
@@ -329,9 +439,12 @@ object CommandHandler {
     /**
      * `unlock <pin>` / `unlock --forget`
      *
-     * Wake the screen, let ghosta swipe up and enter the PIN. A successful
-     * unlock REMEMBERS the PIN (AES/GCM via Android Keystore) so that later
-     * `update self` runs can unlock unattended; pass `--forget` to wipe it.
+     * Wake the screen, let ghosta enter the PIN, and persist the PIN only
+     * AFTER the keyguard is verified gone. A confirmed unlock REMEMBERS the
+     * PIN (AES/GCM via Android Keystore) so later `update self` runs can
+     * unlock unattended; pass `--forget` to wipe it. Failure is returned as
+     * `ok:false` (and therefore a failed wire envelope) so a bad PIN is never
+     * remembered.
      */
     private fun unlockCmd(ctx: Context, args: JSONArray): JSONObject {
         val pin = args.optString(0, "")
@@ -350,17 +463,122 @@ object CommandHandler {
     /** Unlock using the PIN remembered from an earlier `unlock`. */
     fun unlockWithStoredPin(ctx: Context): JSONObject {
         val pin = Prefs.pin(ctx)
-            ?: return JSONObject().put("ok", false).put("error", "no stored PIN")
+            ?: return UnlockSafety.failureFrom(null, "stored_pin", "no stored PIN")
         return doUnlock(ctx, pin)
     }
 
+    /**
+     * Wake, then let ghosta reveal/enter/submit the keyguard PIN and prove the
+     * device is actually unlocked.
+     *
+     * ghostd re-checks KeyguardManager itself after ghosta reports success:
+     * a typed PIN is not an unlock. Nothing here logs or returns the PIN.
+     */
     private fun doUnlock(ctx: Context, pin: String): JSONObject {
+        UnlockSafety.validatePinShape(pin)?.let {
+            return UnlockSafety.failureFrom(null, "validation", it)
+        }
+        val km = try {
+            ctx.getSystemService(KeyguardManager::class.java)
+        } catch (_: Exception) {
+            null
+        } ?: return UnlockSafety.failureFrom(
+            null, "keyguard_state",
+            "keyguard state unavailable; cannot verify an unlock"
+        )
+        if (UnlockSafety.isUnlocked(km.isKeyguardLocked, km.isDeviceLocked)) {
+            return JSONObject()
+                .put("ok", true)
+                .put("unlocked", true)
+                .put("already_unlocked", true)
+                .put("typed", false)
+        }
         try {
             SystemControl.wake(ctx)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            return UnlockSafety.failureFrom(
+                null, "wake", "cannot wake the display: ${e.message}"
+            )
         }
-        Thread.sleep(700)
-        return sidekickSend(JSONObject().put("cmd", "unlock").put("pin", pin))
+        if (!awaitInteractive(ctx, WAKE_WAIT_MS)) {
+            return UnlockSafety.failureFrom(
+                null, "wake",
+                "display did not become interactive; check power/doze state and retry"
+            )
+        }
+        // Face/fingerprint or a wake gesture may have dismissed the keyguard
+        // between the first check and now.
+        if (UnlockSafety.isUnlocked(km.isKeyguardLocked, km.isDeviceLocked)) {
+            return JSONObject()
+                .put("ok", true)
+                .put("unlocked", true)
+                .put("already_unlocked", true)
+                .put("typed", false)
+        }
+
+        val res = sidekickSend(JSONObject().put("cmd", "unlock").put("pin", pin))
+        if (!res.optBoolean("ok", false)) {
+            // Do not report a failure if the keyguard actually cleared while
+            // ghosta was giving up (state propagation can lag one poll).
+            if (awaitUnlocked(km, SIDEKICK_FAILURE_SETTLE_MS)) {
+                return JSONObject()
+                    .put("ok", true)
+                    .put("unlocked", true)
+                    .put("verified", true)
+                    .put("typed", res.optBoolean("typed", false))
+            }
+            return UnlockSafety.failureFrom(
+                res, res.optString("stage", "sidekick"),
+                res.optString("error", "unlock failed on the lock screen")
+            )
+        }
+        if (awaitUnlocked(km, UNLOCK_VERIFY_MS)) {
+            return res.put("ok", true)
+                .put("unlocked", true)
+                .put("verified", true)
+        }
+        return UnlockSafety.failureFrom(
+            null, "verify",
+            "unlock not confirmed: the keyguard is still locked after PIN entry. " +
+                "Check the PIN and that the lock screen accepts accessibility input, then retry"
+        )
+    }
+
+    /** Wait (bounded) for PowerManager.isInteractive. */
+    private fun awaitInteractive(ctx: Context, timeoutMs: Long): Boolean {
+        val pm = try {
+            ctx.getSystemService(PowerManager::class.java)
+        } catch (_: Exception) {
+            null
+        } ?: return true
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (true) {
+            if (pm.isInteractive) return true
+            if (SystemClock.elapsedRealtime() >= deadline) return false
+            try {
+                Thread.sleep(INTERACTIVE_POLL_MS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return pm.isInteractive
+            }
+        }
+    }
+
+    /** Wait (bounded) for KeyguardManager to report unlocked. */
+    private fun awaitUnlocked(km: KeyguardManager, timeoutMs: Long): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (true) {
+            if (UnlockSafety.isUnlocked(km.isKeyguardLocked, km.isDeviceLocked)) {
+                return true
+            }
+            if (SystemClock.elapsedRealtime() >= deadline) return false
+            try {
+                Thread.sleep(UNLOCK_POLL_MS)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return UnlockSafety.isUnlocked(km.isKeyguardLocked, km.isDeviceLocked)
+            }
+        }
     }
 
     /**
@@ -612,18 +830,270 @@ object CommandHandler {
         return out
     }
 
-    /** shell: run `sh -c <command>`, capture rc/stdout/stderr. */
-    private fun shell(command: String): JSONObject {
-        val proc = Runtime.getRuntime().exec(arrayOf("sh", "-c", command))
-        val stdout = proc.inputStream.bufferedReader().readText()
-        val stderr = proc.errorStream.bufferedReader().readText()
+    /** Parsed `shell` invocation; defaults preserve the old output shape. */
+    internal data class ShellRequest(
+        val command: String,
+        val timeoutMs: Long = SHELL_TIMEOUT_MS,
+        val maxOutputBytes: Int = SHELL_MAX_OUTPUT_BYTES
+    )
+
+    /**
+     * shell: parse optional `--timeout <ms>` / `--max-bytes <n>` and run the
+     * remaining command. Values are clamped to [SHELL_MIN_TIMEOUT_MS]..
+     * [SHELL_MAX_TIMEOUT_MS] and [SHELL_MIN_OUTPUT_BYTES]..
+     * [SHELL_MAX_OUTPUT_CAP]; malformed values leave the default untouched.
+     */
+    internal fun shell(args: JSONArray): JSONObject {
+        val req = parseShellArgs(args)
+        return shell(req.command, req.timeoutMs, req.maxOutputBytes)
+    }
+
+    /**
+     * Accept flags either as separate array entries (direct protocol clients)
+     * or as a leading prefix of the command string. The operator CLI joins its
+     * whole shell line into `args[0]`, so both forms reach this parser.
+     */
+    internal fun parseShellArgs(args: JSONArray): ShellRequest {
+        var timeoutMs = SHELL_TIMEOUT_MS
+        var maxOutputBytes = SHELL_MAX_OUTPUT_BYTES
+
+        fun applyFlag(name: String, raw: String): Boolean = when (name) {
+            "--timeout" -> {
+                val value = raw.toLongOrNull() ?: return false
+                timeoutMs = value.coerceIn(SHELL_MIN_TIMEOUT_MS, SHELL_MAX_TIMEOUT_MS)
+                true
+            }
+            "--max-bytes" -> {
+                val value = raw.toLongOrNull() ?: return false
+                maxOutputBytes = value.coerceIn(
+                    SHELL_MIN_OUTPUT_BYTES.toLong(), SHELL_MAX_OUTPUT_CAP.toLong()
+                ).toInt()
+                true
+            }
+            else -> false
+        }
+
+        var idx = 0
+        var sawFlagEntry = false
+        // Only a multi-entry args array can carry flags as separate tokens.
+        // A single entry is the whole command line (the CLI joins it), so its
+        // leading flags are handled by stripShellFlagPrefix below.
+        while (args.length() > 1 && idx < args.length()) {
+            val token = args.optString(idx, "")
+            when {
+                token == "--timeout" || token == "--max-bytes" -> {
+                    sawFlagEntry = true
+                    val value = args.optString(idx + 1, "")
+                    if (value.isEmpty() || !applyFlag(token, value)) break
+                    idx += 2
+                }
+                token.startsWith("--timeout=") -> {
+                    sawFlagEntry = true
+                    if (!applyFlag("--timeout", token.substringAfter('='))) break
+                    idx += 1
+                }
+                token.startsWith("--max-bytes=") -> {
+                    sawFlagEntry = true
+                    if (!applyFlag("--max-bytes", token.substringAfter('='))) break
+                    idx += 1
+                }
+                else -> break
+            }
+        }
+        if (sawFlagEntry) {
+            val command = (idx until args.length()).joinToString(" ") {
+                args.optString(it, "")
+            }
+            return ShellRequest(command, timeoutMs, maxOutputBytes)
+        }
+
+        // No separate flag entries: allow a flag prefix inside args[0].
+        val command = stripShellFlagPrefix(args.optString(0, "id")) { name, value ->
+            applyFlag(name, value)
+        }
+        return ShellRequest(command, timeoutMs, maxOutputBytes)
+    }
+
+    /**
+     * Remove recognized leading `--timeout`/`--max-bytes` tokens from a single
+     * joined command string, leaving the command text otherwise untouched.
+     */
+    private inline fun stripShellFlagPrefix(
+        text: String,
+        apply: (name: String, value: String) -> Boolean
+    ): String {
+        var i = 0
+        var consumed = 0
+        while (true) {
+            while (i < text.length && text[i].isWhitespace()) i++
+            if (i >= text.length || !text.startsWith("--", i)) break
+            val flagStart = i
+            while (i < text.length && !text[i].isWhitespace()) i++
+            val token = text.substring(flagStart, i)
+            val eq = token.indexOf('=')
+            val name: String
+            val value: String
+            if (eq >= 0) {
+                name = token.substring(0, eq)
+                value = token.substring(eq + 1)
+            } else {
+                name = token
+                var valueStart = i
+                while (valueStart < text.length && text[valueStart].isWhitespace()) valueStart++
+                var valueEnd = valueStart
+                while (valueEnd < text.length && !text[valueEnd].isWhitespace()) valueEnd++
+                if (valueStart == valueEnd) break  // missing value
+                value = text.substring(valueStart, valueEnd)
+                i = valueEnd
+            }
+            if (!apply(name, value)) break
+            consumed = i
+        }
+        return if (consumed == 0) text else text.substring(consumed).trimStart()
+    }
+
+    /**
+     * shell: run `sh -c <command>`, capture rc/stdout/stderr.
+     *
+     * Both pipes are drained concurrently. Reading one to EOF before the
+     * other deadlocks when the child fills the unread pipe and never closes
+     * the first one. The process lifetime and each captured stream are
+     * bounded; a timed-out child is destroyed so the worker cannot linger
+     * after the server gives up.
+     *
+     * On timeout/interrupt the child's stdin and both pipes are closed after
+     * destroy so blocked readers wake and descendants get EOF/SIGPIPE.
+     */
+    internal fun shell(
+        command: String,
+        timeoutMs: Long = SHELL_TIMEOUT_MS,
+        maxOutputBytes: Int = SHELL_MAX_OUTPUT_BYTES
+    ): JSONObject {
+        val proc = try {
+            Runtime.getRuntime().exec(arrayOf("sh", "-c", command))
+        } catch (e: Exception) {
+            return JSONObject().put("rc", -1)
+                .put("stdout", "")
+                .put("stderr", "failed to start: ${e.message}")
+        }
+
+        val stdout = AtomicReference(StreamCapture("", false))
+        val stderr = AtomicReference(StreamCapture("", false))
+        val stdoutThread = Thread {
+            stdout.set(readBounded(proc.inputStream, maxOutputBytes))
+        }.apply {
+            isDaemon = true
+            name = "ghostd-shell-stdout"
+        }
+        val stderrThread = Thread {
+            stderr.set(readBounded(proc.errorStream, maxOutputBytes))
+        }.apply {
+            isDaemon = true
+            name = "ghostd-shell-stderr"
+        }
+        stdoutThread.start()
+        stderrThread.start()
+
+        var timedOut = false
         val rc = try {
-            proc.waitFor()
+            if (proc.waitFor(timeoutMs, TimeUnit.MILLISECONDS)) {
+                proc.exitValue()
+            } else {
+                timedOut = true
+                proc.destroy()
+                if (!proc.waitFor(500, TimeUnit.MILLISECONDS)) {
+                    proc.destroyForcibly()
+                    proc.waitFor(500, TimeUnit.MILLISECONDS)
+                }
+                -1
+            }
         } catch (_: InterruptedException) {
             Thread.currentThread().interrupt()
+            timedOut = true
+            proc.destroyForcibly()
             -1
         }
-        return JSONObject().put("rc", rc).put("stdout", stdout).put("stderr", stderr)
+
+        // On timeout/force-kill close the pipes immediately: this wakes the
+        // reader threads (Thread.interrupt() does NOT unblock a native read)
+        // and gives any descendants EOF/SIGPIPE instead of leaving them
+        // blocked on a full pipe.
+        if (timedOut) closeProcessStreams(proc)
+
+        // A normally-exiting child has already written to the pipes; let the
+        // readers drain them before closing so no output is lost.
+        joinReader(stdoutThread)
+        joinReader(stderrThread)
+
+        // Always release the pipe FDs, and unblock a reader that is somehow
+        // still stuck after the bounded join above.
+        closeProcessStreams(proc)
+        joinReader(stdoutThread, PIPE_CLOSE_JOIN_MS)
+        joinReader(stderrThread, PIPE_CLOSE_JOIN_MS)
+
+        val so = stdout.get()
+        val se = stderr.get()
+        val out = JSONObject()
+            .put("rc", rc)
+            .put("stdout", so.text)
+            .put("stderr", se.text)
+        if (timedOut) out.put("timed_out", true)
+        if (so.truncated || se.truncated) out.put("truncated", true)
+        return out
+    }
+
+    private class StreamCapture(val text: String, val truncated: Boolean)
+
+    /**
+     * Read a stream up to [cap] bytes, then keep draining (discarding) so
+     * the child never blocks on a full pipe. Returns the captured text and
+     * whether anything was dropped.
+     */
+    private fun readBounded(stream: java.io.InputStream, cap: Int): StreamCapture {
+        val limit = cap.coerceAtLeast(0)
+        val buf = java.io.ByteArrayOutputStream()
+        val chunk = ByteArray(8192)
+        var truncated = false
+        try {
+            while (true) {
+                val n = stream.read(chunk)
+                if (n < 0) break
+                if (buf.size() < limit) {
+                    val write = minOf(n, limit - buf.size())
+                    buf.write(chunk, 0, write)
+                    if (write < n) truncated = true
+                } else {
+                    truncated = true
+                }
+            }
+        } catch (_: Exception) {
+            // stream closed when the process exits / is destroyed
+        }
+        return StreamCapture(buf.toString("UTF-8"), truncated)
+    }
+
+    /** Close all three child pipes so no reader thread or FD is left behind. */
+    private fun closeProcessStreams(proc: Process) {
+        try {
+            proc.outputStream.close()
+        } catch (_: Exception) {
+        }
+        try {
+            proc.errorStream.close()
+        } catch (_: Exception) {
+        }
+        try {
+            proc.inputStream.close()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun joinReader(thread: Thread, timeoutMs: Long = READER_JOIN_MS) {
+        try {
+            thread.join(timeoutMs)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
     }
 
     private fun error(cmdId: String, message: String): JSONObject = JSONObject()
@@ -632,4 +1102,39 @@ object CommandHandler {
 
     /** Safety cap for files tree output entries. */
     private const val TREE_ENTRY_CAP = 10_000
+
+    /** Bound for shell execution: kill a child that runs too long. */
+    private const val SHELL_TIMEOUT_MS = 30_000L
+
+    /** Bounds accepted from `shell --timeout`. */
+    private const val SHELL_MIN_TIMEOUT_MS = 100L
+    private const val SHELL_MAX_TIMEOUT_MS = 600_000L
+
+    /** Bound each captured stream so a runaway command cannot exhaust memory. */
+    private const val SHELL_MAX_OUTPUT_BYTES = 1_000_000
+
+    /** Bounds accepted from `shell --max-bytes`. */
+    private const val SHELL_MIN_OUTPUT_BYTES = 1
+    private const val SHELL_MAX_OUTPUT_CAP = 10_000_000
+
+    /** Bounded wait for the pipe readers after the child has exited/was killed. */
+    private const val READER_JOIN_MS = 1_000L
+
+    /** Extra wait after closing the pipes to let readers record their result. */
+    private const val PIPE_CLOSE_JOIN_MS = 200L
+
+    /** Wait for the display to report interactive after an explicit wake. */
+    private const val WAKE_WAIT_MS = 3_000L
+    private const val INTERACTIVE_POLL_MS = 100L
+
+    /**
+     * How long ghostd waits for KeyguardManager to confirm the unlock after
+     * ghosta says it submitted the PIN. ghosta has its own bounded wait; this
+     * is the independent proof that the keyguard is actually gone.
+     */
+    private const val UNLOCK_VERIFY_MS = 5_000L
+    private const val UNLOCK_POLL_MS = 200L
+
+    /** Brief grace before turning a ghosta failure into a confirmed failure. */
+    private const val SIDEKICK_FAILURE_SETTLE_MS = 2_500L
 }

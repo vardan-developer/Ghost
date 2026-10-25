@@ -3,6 +3,7 @@ package com.tg.ghosta
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityService.TakeScreenshotCallback
 import android.accessibilityservice.GestureDescription
+import android.app.KeyguardManager
 import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
@@ -20,9 +21,166 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * The sidekick accessibility service. Generic UI-driving verbs only — no
- * hardcoded flows (see PROJECT.md "Dynamic UI driving"). The operator
- * inspects the tree via `dump`/`find` and decides what to tap.
+ * Pure (JVM-tested) keyguard unlock decisions.
+ *
+ * Safety rules:
+ *  - a PIN is only considered while KeyguardManager reports the device
+ *    locked;
+ *  - input is only allowed into an exact system/keyguard package whose class
+ *    carries a keyguard marker or whose tree really looks like PIN entry;
+ *  - an already-unlocked device is a success and never receives key input;
+ *  - PIN shape is validated before any input, and the PIN is never included
+ *    in a result or error.
+ */
+object UnlockPolicy {
+    const val MIN_PIN_LENGTH = 4
+    const val MAX_PIN_LENGTH = 32
+
+    /** Exact packages that may host the keyguard/bouncer input surface. */
+    val KEYGUARD_PACKAGES: Set<String> = linkedSetOf(
+        "com.android.systemui",
+        "com.google.android.systemui",
+        "com.android.keyguard",
+        "android"
+    )
+
+    private val KEYGUARD_CLASS_MARKERS = listOf(
+        "keyguard", "bouncer", "lockscreen", "pinview", "passwordview",
+        "confirmdevicecredentials", "simunlock"
+    )
+
+    /** Exact affirmative labels for a keyguard submit/enter control. */
+    private val SUBMIT_LABELS = setOf(
+        "enter", "ok", "okay", "unlock", "confirm", "done", "submit", "→", "↵"
+    )
+
+    /** Resource-id markers that identify a submit/enter key. */
+    private val SUBMIT_ID_MARKERS = listOf(
+        "key_enter", "btn_enter", "pin_enter", "keyguard_enter",
+        "key_ok", "btn_ok", "unlock_button", "confirm_button", "submit_button"
+    )
+
+    /** Reasonable pre-input shape check: printable ASCII, 4-32 chars. */
+    fun validatePinShape(pin: String): String? {
+        if (pin.length !in MIN_PIN_LENGTH..MAX_PIN_LENGTH) {
+            return "unlock: PIN must be $MIN_PIN_LENGTH-$MAX_PIN_LENGTH characters"
+        }
+        if (pin.any { it.code < 0x21 || it.code > 0x7e }) {
+            return "unlock: PIN must be printable ASCII without spaces or control characters"
+        }
+        return null
+    }
+
+    fun hasEditableField(nodes: List<NodeData>): Boolean = nodes.any { it.editable }
+
+    /** Single-character digit nodes, first occurrence per digit. */
+    fun keypadDigits(nodes: List<NodeData>): Map<Char, NodeData> {
+        val out = LinkedHashMap<Char, NodeData>()
+        for (n in nodes) {
+            val label = (n.text ?: n.desc)?.trim() ?: continue
+            if (label.length != 1) continue
+            val c = label[0]
+            if (c in '0'..'9' && c !in out) out[c] = n
+        }
+        return out
+    }
+
+    /** True when the tree exposes a PIN/password field or a full keypad. */
+    fun pinEntryVisible(nodes: List<NodeData>): Boolean =
+        hasEditableField(nodes) || keypadDigits(nodes).size >= 4
+
+    /**
+     * Recognize the keyguard input surface. The keyguard must report locked,
+     * the package must be an exact system package, and either the window
+     * class carries a keyguard marker or the tree exposes PIN entry. Anything
+     * else is refused so a PIN can never be typed into an arbitrary window.
+     */
+    fun isRecognizedKeyguardSurface(
+        packageName: String?,
+        className: String?,
+        keyguardLocked: Boolean,
+        nodes: List<NodeData>
+    ): Boolean {
+        if (!keyguardLocked) return false
+        val pkg = packageName?.trim()?.lowercase().orEmpty()
+        if (pkg !in KEYGUARD_PACKAGES) return false
+        val cls = className?.trim()?.lowercase().orEmpty()
+        val classMarked = KEYGUARD_CLASS_MARKERS.any { cls.contains(it) }
+        val packageMarked = pkg.contains("keyguard")
+        // A full PIN keypad is distinctive. A bare editable field is NOT
+        // enough: systemui also hosts quick-settings search fields, and a PIN
+        // must never be typed there.
+        val keypadMarked = keypadDigits(nodes).size >= 4
+        val pinFieldMarked = nodes.any { n ->
+            if (!n.editable) return@any false
+            val id = n.viewId?.lowercase().orEmpty()
+            val fieldClass = n.className?.lowercase().orEmpty()
+            id.contains("pin") || id.contains("password") || id.contains("bouncer") ||
+                fieldClass.contains("pin") || fieldClass.contains("password")
+        }
+        return classMarked || packageMarked || keypadMarked || pinFieldMarked
+    }
+
+    /**
+     * Find a keyguard submit control, preferring a recognized resource id,
+     * then a clickable exact label, then any exact label.
+     */
+    fun submitControl(nodes: List<NodeData>): NodeData? {
+        nodes.firstOrNull { n ->
+            val id = n.viewId?.lowercase().orEmpty()
+            id.isNotEmpty() && SUBMIT_ID_MARKERS.any { id.contains(it) }
+        }?.let { return it }
+        val labelled = nodes.filter { n ->
+            listOfNotNull(n.text, n.desc)
+                .map { it.trim().lowercase() }
+                .any { it in SUBMIT_LABELS }
+        }
+        return labelled.firstOrNull { it.clickable } ?: labelled.firstOrNull()
+    }
+
+    /** Success result. Never contains the PIN. */
+    fun unlockedResult(
+        alreadyUnlocked: Boolean,
+        steps: List<String> = emptyList()
+    ): Map<String, Any?> {
+        val out = LinkedHashMap<String, Any?>()
+        out["ok"] = true
+        out["what"] = "unlock"
+        out["unlocked"] = true
+        if (alreadyUnlocked) out["already_unlocked"] = true
+        out["typed"] = !alreadyUnlocked && steps.isNotEmpty()
+        if (steps.isNotEmpty()) out["steps"] = steps
+        return out
+    }
+
+    /**
+     * Actionable failure, tagged with the stage that failed. The PIN is never
+     * part of this map.
+     */
+    fun failure(
+        stage: String,
+        message: String,
+        steps: List<String> = emptyList(),
+        typed: Boolean = false
+    ): Map<String, Any?> {
+        val out = LinkedHashMap<String, Any?>()
+        out["ok"] = false
+        out["error"] = message
+        out["stage"] = stage
+        out["typed"] = typed
+        if (steps.isNotEmpty()) out["steps"] = steps
+        return out
+    }
+}
+
+/**
+ * The sidekick accessibility service. Generic UI-driving verbs for the
+ * operator, plus bounded auto-confirm of recognized system consent surfaces:
+ * MediaProjection consent is confirmed only while ghostd's short-TTL
+ * projection expectation is active (it arms it immediately before its own
+ * capture request), while installer/permission dialogs are only confirmed when
+ * explicitly armed. The operator still inspects the tree via `dump`/`find` and
+ * decides what to tap; see [ConsentPolicy] for the safety rules.
  */
 class GhostAccessibilityService : AccessibilityService(), UiDriver {
 
@@ -32,43 +190,20 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
             private set
 
         /**
-         * When armed, the service auto-taps buttons matching these exact
-         * (lowercased, trimmed) texts — powers auto-confirming
-         * MediaProjection ("Start now") and installer dialogs.
-         * Easy to extend: just add entries.
+         * Affirmative labels the bounded consent policy may tap. Projection
+         * consent ("Start now", "Share screen", whole-display selection) is
+         * scoped to the projection consent activity class *and* requires the
+         * short-TTL expectation ghostd arms immediately before its request;
+         * installer/permission confirmation remains armed-only.
          */
-        val CONFIRM_TEXTS = listOf(
-            "allow",
-            "ok",
-            "okay",
-            "start now",
-            "start",
-            "start recording",
-            "install",
-            "install anyway",
-            "update",
-            "continue",
-            "while using the app",
-            // Android 14+ screen-capture consent sheet (whole-display):
-            // "Share entire screen" summary + "Share screen" button.
-            "share screen",
-            "start recording or casting",
-            "allow all the time",
-            "got it"
-        )
+        val CONFIRM_TEXTS: List<String> = ConsentPolicy.allConfirmTexts()
 
         /**
-         * Packages whose dialogs may be auto-confirmed. Anything else (a
-         * random app's "OK"/"Share" button) must never be tapped blind.
+         * Exact system packages whose consent surfaces may be automated. A
+         * package prefix alone is never enough: the window class must also
+         * carry a MediaProjection/PackageInstaller/permission marker.
          */
-        val SYSTEM_DIALOG_PKGS = listOf(
-            "com.android.packageinstaller",
-            "com.google.android.packageinstaller",
-            "com.android.permissioncontroller",
-            "com.google.android.permissioncontroller",
-            "com.android.systemui",
-            "android"
-        )
+        val SYSTEM_DIALOG_PKGS: List<String> = ConsentPolicy.SYSTEM_PACKAGES.toList()
 
         private const val ROOT_ID = "root"
         private const val TAP_MS = 60L
@@ -78,14 +213,66 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
         const val KICK_ACTION = "com.tg.ghostd.KICK"
         private const val BABYSIT_CHECK_MS = 5 * 60_000L   // check every 5 min
         private const val BABYSIT_STALE_MS = 15 * 60_000L   // stale after 15 min
+
+        // Keyguard unlock bounds. Keep the whole attempt comfortably inside
+        // the sidekick link's 10 s read timeout: reveal 2.1 s + input ~1 s +
+        // submit (control then Enter) 3.6 s worst case.
+        private const val REVEAL_MAX_ATTEMPTS = 3
+        private const val REVEAL_DELAY_MS = 700L
+        private const val KEYPAD_DIGIT_DELAY_MS = 120L
+        private const val KEYGUARD_SETTLE_MS = 250L
+        private const val SUBMIT_WAIT_MS = 1_800L
+        private const val UNLOCK_POLL_MS = 150L
     }
 
     private var link: LocalLinkServer? = null
 
+    /** Serializes unlock attempts so two callers cannot interleave key input. */
+    private val unlockLock = Any()
+
+    private enum class PinEntry { TYPED, UNLOCKED, FAILED }
+    private enum class SubmitOutcome { UNLOCKED, FAILED, NO_METHOD }
+    private class KeyguardSurface(val nodes: List<NodeData>)
+
     @Volatile
     private var armed = false
-    private var lastAutoTapAt = 0L
-    private var lastAutoTapKey = ""
+
+    /**
+     * Short-TTL "ghostd just asked for a capture" marker. MediaProjection
+     * consent is only auto-confirmed while this is active; generic [armed]
+     * never enables it (see [ProjectionExpectation]).
+     */
+    private val projectionExpectation = ProjectionExpectation()
+
+    /** Bounded consent automation state (see [ConsentPolicy]). */
+    private val consentHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val consentRetry = Runnable { attemptConsent() }
+    private val consentTracker = ConsentAttemptTracker()
+
+    /**
+     * Decommission watcher. Armed only by an explicit prepare+confirmed
+     * handshake bound to the link that confirmed; never by routine traffic.
+     */
+    private val decommissionHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val decommissionSelfUninstall = Runnable { resolveDecommissionWatcher() }
+    private fun resolveDecommissionWatcher() {
+        when (Decommission.state.watcherOutcome(SystemClock.elapsedRealtime())) {
+            DecommissionWatcherOutcome.UNINSTALL -> {
+                val launched = Decommission.launchSelfUninstall(this)
+                Decommission.state.selfUninstallResult(launched)
+            }
+            DecommissionWatcherOutcome.WAIT -> decommissionHandler.postDelayed(
+                decommissionSelfUninstall, 500L
+            )
+            DecommissionWatcherOutcome.ABORT -> Unit
+        }
+    }
+
+    /** Last window-state identity; content-changed events reuse it. */
+    @Volatile
+    private var lastWindowPackage: String? = null
+    @Volatile
+    private var lastWindowClassName: String? = null
 
     /** Babysitter: ghostd beacons over the local link every heartbeat; if it
      *  goes silent too long it's dead or wedged — kick it back to life.
@@ -114,6 +301,15 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        consentTracker.reset()
+        projectionExpectation.clear()
+        lastWindowPackage = null
+        lastWindowClassName = null
+        consentHandler.removeCallbacks(consentRetry)
+        // A rebind starts a new link generation: any previous handshake is
+        // stale and must never fire a self-uninstall.
+        decommissionHandler.removeCallbacks(decommissionSelfUninstall)
+        Decommission.state.reset()
         link = LocalLinkServer(this).also { it.start() }
         // Once the system binds us, the launcher icon has done its job.
         MainActivity.hideLauncherIcon(this)
@@ -123,6 +319,10 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
 
     override fun onDestroy() {
         babysitHandler.removeCallbacks(babysitCheck)
+        consentHandler.removeCallbacks(consentRetry)
+        projectionExpectation.clear()
+        decommissionHandler.removeCallbacks(decommissionSelfUninstall)
+        Decommission.state.reset()
         link?.stop()
         link = null
         instance = null
@@ -132,76 +332,139 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
     override fun onUnbind(intent: android.content.Intent): Boolean {
         // service about to be disabled — stop listening until rebind
         if (instance === this) instance = null
+        consentHandler.removeCallbacks(consentRetry)
+        projectionExpectation.clear()
+        decommissionHandler.removeCallbacks(decommissionSelfUninstall)
+        Decommission.state.reset()
         return super.onUnbind(intent)
     }
 
     override fun onInterrupt() {}
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (!armed || event == null) return
+        if (event == null) return
         when (event.eventType) {
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
-            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> autoConfirm()
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
+                // This is the only event carrying the activity/window class;
+                // content-changed events reuse it while the window is stable.
+                lastWindowPackage = event.packageName?.toString()
+                lastWindowClassName = event.className?.toString()
+                consentHandler.removeCallbacks(consentRetry)
+                attemptConsent()
+            }
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
+                // Background apps also post content events; only a change of
+                // the *active* window invalidates the remembered class.
+                val pkg = rootInActiveWindow?.packageName?.toString()
+                if (pkg != null && pkg != lastWindowPackage) {
+                    // Another window took over; never reuse a stale class.
+                    lastWindowPackage = pkg
+                    lastWindowClassName = null
+                    consentHandler.removeCallbacks(consentRetry)
+                }
+                attemptConsent()
+            }
         }
     }
 
     // ------------------------------------------------------------------ //
-    // armed auto-confirm
+    // bounded consent auto-confirm
+    //
+    // MediaProjection consent is only confirmed while ghostd's short-TTL
+    // projection expectation is active (it is sent immediately before its own
+    // request); installer/permission remain armed-only and a plain arm never
+    // enables projection. Every path is restricted to exact system packages
+    // plus a consent class marker, skipped entirely while the keyguard is
+    // locked, and capped per window.
 
-    private fun autoConfirm() {
-        val now = SystemClock.elapsedRealtime()
-        if (now - lastAutoTapAt < 1200) return
-        val root = rootInActiveWindow ?: return
-        // Only system confirmation surfaces (install sheet, runtime-permission
-        // prompt, screen-share consent). Tapping "ok"/"share" inside a random
-        // app's UI would be wrong, so everything else is ignored.
-        val pkg = root.packageName?.toString() ?: ""
-        if (SYSTEM_DIALOG_PKGS.none { pkg.startsWith(it) }) return
-        val snap = snapshot(root) ?: return
-        val flat = NodeTree.flatten(snap)
-        val cand = flat.firstOrNull { confirmText(it) } ?: return
-        val target = if (cand.clickable) cand else ancestorClickable(cand, flat)
-        if (target != null) {
-            if (target.id == lastAutoTapKey && now - lastAutoTapAt < 5000) return
-            lastAutoTapAt = now
-            lastAutoTapKey = target.id
-            performClick(target.id)
+    private fun attemptConsent() {
+        val locked = keyguardLocked()
+        if (locked) {
+            consentTracker.reset()
             return
         }
-        // OEM dialogs sometimes expose only a non-clickable label: tap its
-        // centre directly (this is what unblocked the screen-share sheet).
-        val c = centreOf(cand.bounds) ?: return
-        if (cand.id == lastAutoTapKey && now - lastAutoTapAt < 5000) return
-        lastAutoTapAt = now
-        lastAutoTapKey = cand.id
-        dispatchGestureAt(c.first, c.second, 60)
-    }
+        val root = rootInActiveWindow
+        if (root == null) {
+            consentTracker.reset()
+            return
+        }
+        val now = SystemClock.elapsedRealtime()
+        val window = ConsentPolicy.windowFor(
+            packageName = lastWindowPackage,
+            className = lastWindowClassName,
+            keyguardLocked = locked,
+            armed = armed,
+            projectionExpected = projectionExpectation.isActive(now),
+            windowId = root.windowId
+        )
+        consentTracker.observe(window)
+        if (window == null || !consentTracker.canAttempt()) return
+        // Same package, different window (shade/keyguard) must not inherit a
+        // consent class remembered from an earlier window.
+        if (root.packageName?.toString() != window.packageName) return
 
-    /** Nearest clickable ancestor of [node] (buttons often wrap a TextView). */
-    private fun ancestorClickable(node: NodeData, flat: List<NodeData>): NodeData? {
-        val byId = flat.associateBy { it.id }
-        var path = node.id
-        while (true) {
-            val cut = path.lastIndexOf('/')
-            if (cut <= 0) return null
-            path = path.substring(0, cut)
-            val a = byId[path] ?: return null
-            if (a.clickable) return a
+        val snap = snapshot(root) ?: return
+        val nodes = NodeTree.flatten(snap)
+        val metrics = resources.displayMetrics
+        val width = metrics.widthPixels
+        val height = metrics.heightPixels
+        // A recognized system uninstall window is matched on the exact
+        // window-state package/class (not merely the installer kind): only
+        // there may the uninstall vocabulary be used, and only while the
+        // decommission state permits that tap. Every other installer sheet
+        // keeps the unchanged generic vocabulary.
+        val uninstallWindow = DecommissionPolicy.isRecognizedUninstallWindow(
+            lastWindowPackage, lastWindowClassName
+        )
+        if ((window.kind == ConsentKind.INSTALLER || uninstallWindow) &&
+            Decommission.state.isPreparing(now)
+        ) {
+            // A prepared decommission is about to open the uninstall sheet.
+            // Suppress installer auto-confirm until `confirmed` binds the
+            // disconnect watcher; otherwise the dialog could be tapped before
+            // ghosta knows when ghostd is actually removed.
+            return
+        }
+        val target = DecommissionPolicy.pickWindowTarget(
+            nodes,
+            window.kind,
+            lastWindowPackage,
+            lastWindowClassName,
+            Decommission.state.allowsUninstallTap(now),
+            width,
+            height
+        ) ?: return
+        if (!consentTracker.beginAttempt(target.key, now)) return
+
+        val tapped = when (val t = target.target) {
+            is TapTarget.Node -> {
+                if (performClick(t.id)) {
+                    true
+                } else {
+                    // Node path went stale between snapshot and click; use the
+                    // snapshot bounds as a bounded coordinate fallback.
+                    ConsentPolicy.centreInBounds(target.bounds, width, height)
+                        ?.let { dispatchGestureAt(it.first, it.second, TAP_MS) } ?: false
+                }
+            }
+            is TapTarget.Point -> dispatchGestureAt(t.x, t.y, TAP_MS)
+        }
+        if (tapped) {
+            // Multi-step sheets ("Entire screen" -> "Share screen") need a
+            // refreshed tree. Bounded by ConsentPolicy.MAX_ATTEMPTS.
+            consentHandler.removeCallbacks(consentRetry)
+            consentHandler.postDelayed(consentRetry, ConsentPolicy.RETRY_DELAY_MS)
         }
     }
 
-    /** "x1,y1,x2,y2" -> centre point. */
-    private fun centreOf(bounds: String?): Pair<Int, Int>? = try {
-        val p = (bounds ?: return null).replace("][", ",").trim('[', ']').split(',')
-        val (x1, y1, x2, y2) = p.take(4).map { it.trim().toInt() }
-        Pair((x1 + x2) / 2, (y1 + y2) / 2)
-    } catch (_: Exception) {
-        null
-    }
-
-    private fun confirmText(n: NodeData): Boolean {
-        val t = (n.text ?: n.desc ?: return false).trim().lowercase()
-        return CONFIRM_TEXTS.contains(t)
+    /**
+     * Keyguard-locked devices suppress consent UI; never tap blind there.
+     * Fails closed via [ConsentPolicy.keyguardLockedOrFailClosed]: an
+     * unavailable KeyguardManager or a throwing query is treated as locked.
+     */
+    private fun keyguardLocked(): Boolean = ConsentPolicy.keyguardLockedOrFailClosed {
+        val km = getSystemService(KeyguardManager::class.java) ?: return@keyguardLockedOrFailClosed null
+        km.isKeyguardLocked || km.isDeviceLocked
     }
 
     // ------------------------------------------------------------------ //
@@ -354,58 +617,307 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
         ) else CommandRouter.err("swipe failed")
     }
 
-    override fun unlock(pin: String): Map<String, Any?> {
+    /**
+     * Enter the keyguard PIN and prove the unlock.
+     *
+     * Order: already-unlocked success; bounded reveal loop (swipe only while
+     * no field/keypad is exposed); recognized-keyguard surface check; input
+     * via ACTION_SET_TEXT, keypad digits with a refreshed tree per digit, or
+     * key events; submit via a recognized control or Enter; then wait for
+     * KeyguardManager to report unlocked. Every failure is `ok:false` with a
+     * stage and an action; the PIN never appears in the result.
+     */
+    override fun unlock(pin: String): Map<String, Any?> = synchronized(unlockLock) {
+        UnlockPolicy.validatePinShape(pin)?.let {
+            return@synchronized UnlockPolicy.failure("validation", it)
+        }
+        val km = getSystemService(KeyguardManager::class.java)
+            ?: return@synchronized UnlockPolicy.failure(
+                "keyguard_state",
+                "keyguard state unavailable; refusing to enter a PIN without verification"
+            )
+        if (!isLocked(km)) {
+            return@synchronized UnlockPolicy.unlockedResult(alreadyUnlocked = true)
+        }
+
         val steps = ArrayList<String>()
-        // 0) On a locked phone the PIN pad usually isn't up yet: the lock
-        //    screen shows clock/notifications and needs a swipe-up first.
-        //    Detect "no editable field and no digit keypad" and swipe.
-        if (!pinEntryVisible()) {
+        var surface = keyguardSurface(km)
+        var reveals = 0
+        // Reveal the PIN entry. Swipe only while no field/keypad is visible,
+        // then refresh and retry a bounded number of times.
+        while (surface == null && reveals < REVEAL_MAX_ATTEMPTS) {
+            if (!isLocked(km)) {
+                return@synchronized UnlockPolicy.unlockedResult(alreadyUnlocked = true)
+            }
+            reveals++
             swipeUpFromBottom()
             steps.add("swipe_up")
-            SystemClock.sleep(800)
+            SystemClock.sleep(REVEAL_DELAY_MS)
+            surface = keyguardSurface(km)
         }
-        // 1) SET_TEXT the PIN into the keyguard PIN field (focused editable node)
-        val node = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-            ?: rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
-        var typed = false
-        if (node != null && node.isEditable) {
-            val args = Bundle()
-            args.putCharSequence(
-                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, pin
+        if (surface == null) {
+            // A reveal swipe can itself dismiss a non-secure keyguard.
+            if (!isLocked(km)) {
+                return@synchronized UnlockPolicy.unlockedResult(
+                    alreadyUnlocked = true, steps = steps
+                )
+            }
+            return@synchronized UnlockPolicy.failure(
+                "reveal",
+                "could not reveal the keyguard PIN/password entry after $reveals swipe " +
+                    "attempts; the lock screen may use a different unlock method or block " +
+                    "accessibility input. Unlock the phone manually, then retry",
+                steps = steps
             )
-            typed = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-            if (typed) steps.add("set_text")
         }
-        // 2) fallback: key events, then tapping the on-screen keypad digits
-        if (!typed) {
-            if (keyByKey(pin)) {
-                typed = true
-                steps.add("keys")
-            }
+
+        val entry = enterPin(pin, km, steps)
+        if (entry == PinEntry.UNLOCKED) {
+            return@synchronized UnlockPolicy.unlockedResult(false, steps)
         }
-        if (!typed) {
-            var clicked = true
-            for (c in pin) {
-                val snap = snapshot(rootInActiveWindow) ?: break
-                val digit = NodeTree.flatten(snap).firstOrNull {
-                    (it.text ?: it.desc ?: "").trim() == c.toString()
+        if (entry != PinEntry.TYPED) {
+            return@synchronized UnlockPolicy.failure(
+                "type",
+                "could not enter the PIN on the keyguard: no editable field, rejected key " +
+                    "events and no tappable digit keypad were available. Unlock the phone " +
+                    "manually, then retry",
+                steps = steps
+            )
+        }
+
+        return@synchronized when (submitPin(km, steps)) {
+            SubmitOutcome.UNLOCKED ->
+                UnlockPolicy.unlockedResult(false, steps)
+            SubmitOutcome.NO_METHOD ->
+                UnlockPolicy.failure(
+                    "submit",
+                    "could not submit the PIN: neither Enter nor a recognized keyguard " +
+                        "submit control responded. Unlock the phone manually, then retry",
+                    steps = steps,
+                    typed = true
+                )
+            SubmitOutcome.FAILED ->
+                UnlockPolicy.failure(
+                    "verify",
+                    "unlock not confirmed: the keyguard is still locked after submitting " +
+                        "the PIN. Check the PIN and that the lock screen accepts " +
+                        "accessibility input, then retry",
+                    steps = steps,
+                    typed = true
+                )
+        }
+    }
+
+    /**
+     * Enter [pin] on the recognized keyguard surface. Returns UNLOCKED when
+     * the keyguard disappears mid-entry (for example auto-submit after the
+     * final digit).
+     */
+    private fun enterPin(
+        pin: String,
+        km: KeyguardManager,
+        steps: ArrayList<String>
+    ): PinEntry {
+        val surface = keyguardSurface(km) ?: return PinEntry.FAILED
+        val editable = surface.nodes
+            .filter { it.editable }
+            .sortedByDescending { n ->
+                val id = n.viewId?.lowercase().orEmpty()
+                when {
+                    id.contains("pin") || id.contains("password") -> 2
+                    id.contains("edit") -> 1
+                    else -> 0
                 }
-                if (digit != null) performClick(digit.id) else { clicked = false; break }
-                SystemClock.sleep(150)
             }
-            if (clicked) {
-                typed = true
-                steps.add("keypad")
+            .firstOrNull()
+
+        if (editable != null) {
+            val node = liveNode(editable.id)
+            if (node != null) {
+                try {
+                    node.refresh()
+                } catch (_: Exception) {
+                }
+                if (node.isEditable) {
+                    val args = Bundle()
+                    args.putCharSequence(
+                        AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, pin
+                    )
+                    if (node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
+                        steps.add("set_text")
+                        SystemClock.sleep(KEYGUARD_SETTLE_MS)
+                        return if (isLocked(km)) PinEntry.TYPED else PinEntry.UNLOCKED
+                    }
+                }
+            }
+            // A field exists but SET_TEXT was rejected: key events may still
+            // reach the focused keyguard field.
+            if (!isLocked(km)) return PinEntry.UNLOCKED
+            try {
+                node?.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            } catch (_: Exception) {
+            }
+            if (keyByKey(pin)) {
+                steps.add("keys")
+                SystemClock.sleep(KEYGUARD_SETTLE_MS)
+                return if (isLocked(km)) PinEntry.TYPED else PinEntry.UNLOCKED
             }
         }
-        // 3) press enter (key event; fallback: click the focused node)
-        var entered = sendKey(KeyEvent.KEYCODE_ENTER, 0)
-        if (!entered) {
-            val focused = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-            entered = focused?.performAction(AccessibilityNodeInfo.ACTION_CLICK) ?: false
+
+        // No useable editable field: prefer the keypad, re-reading the tree
+        // before every digit so stale node paths cannot type into the wrong
+        // place. Blind key events remain the last resort.
+        val keypadSurface = keyguardSurface(km)
+        if (keypadSurface != null && UnlockPolicy.keypadDigits(keypadSurface.nodes).isNotEmpty()) {
+            for (c in pin) {
+                if (!isLocked(km)) return PinEntry.UNLOCKED
+                val fresh = keyguardSurface(km) ?: return PinEntry.FAILED
+                val digit = UnlockPolicy.keypadDigits(fresh.nodes)[c] ?: return PinEntry.FAILED
+                if (!performClick(digit.id)) return PinEntry.FAILED
+                SystemClock.sleep(KEYPAD_DIGIT_DELAY_MS)
+            }
+            steps.add("keypad")
+            SystemClock.sleep(KEYGUARD_SETTLE_MS)
+            return if (isLocked(km)) PinEntry.TYPED else PinEntry.UNLOCKED
         }
-        if (entered) steps.add("enter")
-        return CommandRouter.ok(mapOf("what" to "unlock", "typed" to typed, "steps" to steps))
+
+        if (!isLocked(km)) return PinEntry.UNLOCKED
+        if (keyByKey(pin)) {
+            steps.add("keys")
+            SystemClock.sleep(KEYGUARD_SETTLE_MS)
+            return if (isLocked(km)) PinEntry.TYPED else PinEntry.UNLOCKED
+        }
+        return PinEntry.FAILED
+    }
+
+    /**
+     * Submit the entered PIN through a recognized keyguard control, then
+     * Enter, and wait for the keyguard to actually disappear.
+     */
+    private fun submitPin(km: KeyguardManager, steps: ArrayList<String>): SubmitOutcome {
+        if (!isLocked(km)) return SubmitOutcome.UNLOCKED
+        var attempted = false
+        val control = keyguardSurface(km)?.let { UnlockPolicy.submitControl(it.nodes) }
+        if (control != null && performClick(control.id)) {
+            steps.add("submit_control")
+            attempted = true
+            if (awaitUnlocked(km, SUBMIT_WAIT_MS)) return SubmitOutcome.UNLOCKED
+        }
+        if (isLocked(km) && sendKey(KeyEvent.KEYCODE_ENTER, 0)) {
+            steps.add("enter")
+            attempted = true
+            if (awaitUnlocked(km, SUBMIT_WAIT_MS)) return SubmitOutcome.UNLOCKED
+        }
+        return if (attempted) SubmitOutcome.FAILED else SubmitOutcome.NO_METHOD
+    }
+
+    private fun isLocked(km: KeyguardManager): Boolean = try {
+        km.isKeyguardLocked || km.isDeviceLocked
+    } catch (_: Exception) {
+        true
+    }
+
+    private fun awaitUnlocked(km: KeyguardManager, timeoutMs: Long): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (true) {
+            if (!isLocked(km)) return true
+            if (SystemClock.elapsedRealtime() >= deadline) return false
+            SystemClock.sleep(UNLOCK_POLL_MS)
+        }
+    }
+
+    /**
+     * Snapshot the active window only when the keyguard is locked and the
+     * window is a recognized system/keyguard surface with PIN entry.
+     */
+    private fun keyguardSurface(km: KeyguardManager): KeyguardSurface? {
+        if (!isLocked(km)) return null
+        val root = rootInActiveWindow ?: return null
+        val pkg = root.packageName?.toString()
+        val cls = if (pkg == lastWindowPackage) lastWindowClassName else null
+        val snap = snapshot(root) ?: return null
+        val nodes = NodeTree.flatten(snap)
+        if (!UnlockPolicy.isRecognizedKeyguardSurface(pkg, cls, true, nodes)) return null
+        // A recognized keyguard window that is still only clock/notifications
+        // must keep the reveal loop going; only a real field/keypad is input.
+        if (!UnlockPolicy.pinEntryVisible(nodes)) return null
+        return KeyguardSurface(nodes)
+    }
+
+    private class Shot(
+        val bitmap: Bitmap?,
+        val error: String?
+    )
+
+    /**
+     * One accessibility screenshot attempt.
+     *
+     * The HardwareBuffer is closed in `finally` on every path, and a bitmap
+     * that arrives after the caller already timed out is recycled instead of
+     * leaking until GC.
+     */
+    private fun captureShotOnce(timeoutMs: Long): Shot {
+        val latch = CountDownLatch(1)
+        val lock = Any()
+        var timedOut = false
+        var bmp: Bitmap? = null
+        var error: String? = null
+        takeScreenshot(
+            Display.DEFAULT_DISPLAY,
+            mainExecutor,
+            object : TakeScreenshotCallback {
+                override fun onSuccess(result: ScreenshotResult) {
+                    val hb = result.hardwareBuffer
+                    var wrapped: Bitmap? = null
+                    var decoded: Bitmap? = null
+                    try {
+                        wrapped = Bitmap.wrapHardwareBuffer(hb, result.colorSpace)
+                        decoded = wrapped?.copy(Bitmap.Config.ARGB_8888, false)
+                    } catch (e: Exception) {
+                        error = "decode: ${e.message}"
+                    } finally {
+                        if (wrapped != null && wrapped !== decoded) {
+                            try {
+                                wrapped.recycle()
+                            } catch (_: Exception) {
+                            }
+                        }
+                        // Always close, including decode failures.
+                        try {
+                            hb.close()
+                        } catch (_: Exception) {
+                        }
+                    }
+                    synchronized(lock) {
+                        if (timedOut) decoded?.recycle() else bmp = decoded
+                        latch.countDown()
+                    }
+                }
+
+                override fun onFailure(errorCode: Int) {
+                    synchronized(lock) {
+                        error = when (errorCode) {
+                            ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT ->
+                                "throttled: wait ~400ms and retry"
+                            ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS ->
+                                "accessibility access lost — re-enable the service"
+                            ERROR_TAKE_SCREENSHOT_INVALID_DISPLAY -> "invalid display"
+                            else -> "screenshot failed (code $errorCode)"
+                        }
+                        latch.countDown()
+                    }
+                }
+            }
+        )
+        if (!latch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+            synchronized(lock) {
+                timedOut = true
+                bmp?.recycle()
+                bmp = null
+            }
+            return Shot(null, "screenshot timeout")
+        }
+        return Shot(bmp, error)
     }
 
     /**
@@ -421,40 +933,8 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
             return CommandRouter.err("accessibility screenshots need Android 11+")
         }
-        val latch = CountDownLatch(1)
-        var bmp: Bitmap? = null
-        var error: String? = null
-        takeScreenshot(
-            Display.DEFAULT_DISPLAY,
-            mainExecutor,
-            object : TakeScreenshotCallback {
-                override fun onSuccess(result: ScreenshotResult) {
-                    try {
-                        val hb = result.hardwareBuffer
-                        bmp = Bitmap.wrapHardwareBuffer(hb, result.colorSpace)
-                            ?.copy(Bitmap.Config.ARGB_8888, false)
-                        hb.close()
-                    } catch (e: Exception) {
-                        error = "decode: ${e.message}"
-                    }
-                    latch.countDown()
-                }
-
-                override fun onFailure(errorCode: Int) {
-                    error = when (errorCode) {
-                        ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT ->
-                            "throttled: wait ~400ms and retry"
-                        ERROR_TAKE_SCREENSHOT_NO_ACCESSIBILITY_ACCESS ->
-                            "accessibility access lost — re-enable the service"
-                        ERROR_TAKE_SCREENSHOT_INVALID_DISPLAY -> "invalid display"
-                        else -> "screenshot failed (code $errorCode)"
-                    }
-                    latch.countDown()
-                }
-            }
-        )
-        if (!latch.await(8, TimeUnit.SECONDS)) return CommandRouter.err("screenshot timeout")
-        val b = bmp ?: return CommandRouter.err(error ?: "screenshot failed")
+        val shot = captureShotOnce(8_000)
+        val b = shot.bitmap ?: return CommandRouter.err(shot.error ?: "screenshot failed")
         return try {
             val png = format.equals("png", true)
             val out = ByteArrayOutputStream()
@@ -478,22 +958,98 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
         }
     }
 
-    override fun setArmed(on: Boolean): Map<String, Any?> {        armed = on
-        if (!on) lastAutoTapKey = ""
-        return CommandRouter.ok(mapOf("armed" to armed))
+    // ------------------------------------------------------------------ //
+    // decommission handshake (owner-authorized ghostd removal)
+
+    /**
+     * prepare / confirmed / cancel / status. The confirmed step only records
+     * intent to watch; the actual self-uninstall starts after the
+     * authenticated link that carried it closes AND no reconnection arrives
+     * within the grace period (see [DecommissionState]).
+     */
+    override fun decommission(
+        action: String?,
+        targetPackage: String?,
+        session: String?,
+        connectionId: Int
+    ): Map<String, Any?> {
+        val res = Decommission.handle(
+            action = action,
+            targetPackage = targetPackage,
+            session = session,
+            connectionId = connectionId,
+            armed = armed,
+            // Self-uninstall runs from the background after ghostd is gone;
+            // without this owner-granted capability prepare must fail.
+            overlayGranted = Decommission.canDrawOverlays(this),
+            nowMs = SystemClock.elapsedRealtime()
+        )
+        if (res["ok"] == true && DecommissionPolicy.parseAction(action) == "confirmed") {
+            // The system uninstall sheet may already be up; handle it without
+            // waiting for the next window event. Normal consent bounds still
+            // apply (armed-only, recognized PackageInstaller class).
+            consentHandler.post { attemptConsent() }
+        }
+        return res
     }
 
-    /** True when the keyguard PIN entry seems on screen (editable field or
-     *  several single-digit buttons — the lock-screen keypad). */
-    private fun pinEntryVisible(): Boolean {
-        val snap = snapshot(rootInActiveWindow) ?: return false
-        val nodes = NodeTree.flatten(snap)
-        if (nodes.any { it.editable }) return true
-        val digits = nodes.count {
-            ((it.text ?: it.desc ?: "").trim().length == 1 &&
-                (it.text ?: it.desc ?: "").trim()[0] in '0'..'9')
+    override fun connectionOpened(connectionId: Int) {
+        if (Decommission.state.onConnectionOpened(SystemClock.elapsedRealtime())) {
+            // ghostd survived: remove a pending self-uninstall.
+            decommissionHandler.removeCallbacks(decommissionSelfUninstall)
         }
-        return digits >= 4
+    }
+
+    override fun connectionClosed(connectionId: Int) {
+        if (!Decommission.state.onConnectionClosed(
+                connectionId, SystemClock.elapsedRealtime()
+            )
+        ) {
+            return
+        }
+        decommissionHandler.removeCallbacks(decommissionSelfUninstall)
+        decommissionHandler.postDelayed(
+            decommissionSelfUninstall, Decommission.state.graceMs
+        )
+    }
+
+    /**
+     * Arm the short-TTL projection expectation for ghostd's own upcoming
+     * capture consent. Does NOT arm installer/permission confirmation.
+     */
+    override fun expectProjection(ttlMs: Long?): Map<String, Any?> {
+        val now = SystemClock.elapsedRealtime()
+        val expiresAt = projectionExpectation.expect(now, ttlMs)
+        // Link threads call this; consent tracking is main-thread only. Run an
+        // immediate attempt so a sheet that is already up is handled.
+        consentHandler.post { attemptConsent() }
+        return CommandRouter.ok(
+            mapOf(
+                "expect" to "projection",
+                "ttl_ms" to (expiresAt - now),
+                "armed" to armed
+            )
+        )
+    }
+
+    override fun setArmed(on: Boolean): Map<String, Any?> {
+        armed = on
+        // Link threads call this; tracker/handler state is main-thread only.
+        if (on) {
+            // Confirm an already-open installer/permission sheet promptly.
+            consentHandler.post { attemptConsent() }
+        } else {
+            // Disarm stops installer/permission confirmation; an in-flight
+            // MediaProjection flow (with its own short-TTL expectation) may
+            // finish its bounded retry.
+            consentHandler.post {
+                if (consentTracker.window?.kind != ConsentKind.MEDIA_PROJECTION) {
+                    consentHandler.removeCallbacks(consentRetry)
+                    consentTracker.reset()
+                }
+            }
+        }
+        return CommandRouter.ok(mapOf("armed" to armed))
     }
 
     /** Swipe up from the bottom center (reveals PIN entry on lock screens). */
@@ -511,8 +1067,14 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
     override fun status(): Map<String, Any?> = CommandRouter.ok(
         mapOf(
             "armed" to armed,
+            // Remaining lifetime of ghostd's projection expectation, 0 if none.
+            "projection_expected_ms" to
+                projectionExpectation.remainingMs(SystemClock.elapsedRealtime()),
             "link_port" to LocalLinkServer.PORT,
-            "confirm_texts" to CONFIRM_TEXTS
+            "confirm_texts" to CONFIRM_TEXTS,
+            // Owner-setup capability for the self-uninstall activity start.
+            "self_uninstall_capable" to Decommission.canDrawOverlays(this),
+            "decommission" to Decommission.state.snapshot(SystemClock.elapsedRealtime())
         )
     )
 

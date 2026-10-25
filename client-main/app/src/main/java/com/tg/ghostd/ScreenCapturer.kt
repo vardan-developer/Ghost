@@ -7,131 +7,192 @@ import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.Image
 import android.media.ImageReader
-import android.media.projection.MediaProjection
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Base64
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import com.neovisionaries.ws.client.WebSocket
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.BlockingQueue
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Screen capture verbs: shot (single PNG, base64 in the command result),
  * record (bounded MJPEG-over-WS stream), live (open-ended stream).
  *
- * Virtual display + ImageReader(RGBA_8888) -> Bitmap -> JPEG at --quality,
- * throttled to --fps. JPEG/MJPEG chosen over H.264 for v1: single-frame
- * decodability, no mux/SPS-PPS plumbing, tunable per-frame quality — one
- * line of justification, as requested.
+ * Consent is requested per capture/session: every shot/stream obtains a fresh
+ * [ProjectionHub.Grant] and releases exactly that projection on every exit
+ * (success, error, stop, timeout, first-frame failure).
  *
- * Wedge-safety (0.2.8): the actual capture work (consent wait, virtual
- * display, frame wait, encode) runs on a dedicated worker thread; the
- * command thread waits for it with a HARD time-box ([SHOT_BUDGET_S]) and
- * force-releases the MediaBus slot on timeout, so `screen shot` always
- * answers and the "busy" lock can never wedge. Every frame wait is
- * bounded, interruptible and stop-aware: `screen stop`/`screen off`
- * interrupt the worker and tear down the virtual display / ImageReader /
- * projection, so the stop path works even when a capture is stuck.
+ * Each capture runs in a [CaptureSession] with its own generation, worker,
+ * virtual display, ImageReader, frame queue and projection. All shared-slot
+ * mutations (MediaBus claim/release, `current`) happen under [lifecycle], and
+ * an old worker checks [isCurrent] before sending or clearing anything, so a
+ * timed-out/stopped session can never stop, clear or send into a newer one.
+ *
+ * The actual capture work runs on a dedicated worker thread; the command
+ * thread waits with a HARD time-box, so `screen shot` always answers. Every
+ * frame wait is bounded, interruptible and stop-aware; `screen stop`/`screen
+ * off` wake the shot waiter, interrupt the worker and release the projection.
  */
 object ScreenCapturer {
     /** ImageReader callbacks need a Looper; capture runs on plain worker
-     *  threads (no Looper) since 0.2.8 — always hand them the main looper.
+     *  threads (no Looper) — always hand them the main looper.
      *  Lazy: JVM unit tests touch this class without an Android runtime. */
     private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
 
-    @Volatile private var stopRequested = false
+    /** One capture session. Fields are owned by the session's worker plus the
+     *  force-stop path; [resLock] makes teardown idempotent. */
+    private class CaptureSession(val gen: Long) {
+        val lifecycle = Any()
+        val resLock = Any()
+        val stopRequested = AtomicBoolean(false)
+        val done = CountDownLatch(1)
 
-    /** Frames pushed to the server by the active stream (first-frame check). */
-    @Volatile private var framesSent = 0L
+        @Volatile var worker: Thread? = null
+        @Volatile var grant: ProjectionHub.Grant? = null
+        @Volatile var display: VirtualDisplay? = null
+        @Volatile var reader: ImageReader? = null
+        @Volatile var frames: BlockingQueue<Image>? = null
+        @Volatile var framesSent = 0L
+        @Volatile var failure: Exception? = null
+        /** True while this session still owns the MediaBus slot. */
+        @Volatile var busOwned = false
+    }
 
-    /** The active shot/stream worker (null when idle) — interrupted by stop(). */
-    @Volatile private var worker: Thread? = null
-    @Volatile private var currentDisplay: VirtualDisplay? = null
-    @Volatile private var currentReader: ImageReader? = null
+    private val lifecycle = Any()
+    private val genCounter = AtomicLong(0L)
+
+    /** The session allowed to touch the bus / projection. Older workers see
+     *  `current !== this` and must not send, clear or stop anything. */
+    @Volatile private var current: CaptureSession? = null
 
     // ------------------------------------------------------------------ shot
 
     /**
      * Single-frame capture. Runs the capture on a worker thread and waits
      * for it with a hard budget: the command response NEVER hangs forever,
-     * and on timeout the busy lock is force-released (retry-able).
+     * and on timeout the session is force-stopped and its projection released.
      */
     fun shot(ctx: Context, ws: WebSocket?): JSONObject {
-        MediaBus.begin(MediaBus.SOURCE_SCREEN, ctx, ws)
-        stopRequested = false
-        val done = CountDownLatch(1)
+        val session = newSession()
+        beginCapture(ctx, ws, session)
+
         val out = arrayOfNulls<JSONObject>(1)
         val err = arrayOfNulls<Exception>(1)
-        val t = Thread {
+        val worker = Thread {
             try {
-                out[0] = shotInternal(ctx)
+                out[0] = shotInternal(ctx, session)
             } catch (e: Exception) {
                 err[0] = e
             } finally {
-                MediaBus.end(MediaBus.SOURCE_SCREEN)
-                worker = null
-                done.countDown()
+                finishSession(session)
+                session.done.countDown()
             }
         }.apply { name = "ghostd-shot"; isDaemon = true }
-        worker = t
-        t.start()
+        session.worker = worker
+        worker.start()
 
-        if (!done.await(SHOT_BUDGET_S, TimeUnit.SECONDS)) {
-            // Worker wedged (stuck binder call etc.): unstick everything so
-            // later screen verbs work, and answer the command now.
-            teardownWorker()
-            MediaBus.forceEnd(MediaBus.SOURCE_SCREEN)
+        val deadline = elapsedMs() + SHOT_BUDGET_MS
+        var completed = false
+        while (true) {
+            val remaining = deadline - elapsedMs()
+            if (remaining <= 0L) break
+            try {
+                if (session.done.await(remaining, TimeUnit.MILLISECONDS)) {
+                    completed = true
+                    break
+                }
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                break
+            }
+        }
+        if (!completed) {
+            // Wedged worker (stuck binder call etc.): release worker, bus and
+            // projection so later screen verbs work, and answer the command.
+            forceStopSession(session)
             throw Exception(
-                "screen shot timed out after ${SHOT_BUDGET_S}s (capture reset; try again)"
+                "screen shot timed out after ${SHOT_BUDGET_MS / 1000}s (capture reset; try again)"
             )
         }
+        // stop()/screen off counts the latch down too: report the stop rather
+        // than a half-written result from the interrupted worker.
+        if (session.stopRequested.get()) throw Exception("screen capture stopped")
         err[0]?.let { throw it }
         return out[0] ?: throw Exception("screen shot failed")
     }
 
-    private fun shotInternal(ctx: Context): JSONObject {
-        val projection = ProjectionHub.ensureProjection(ctx)
+    private fun shotInternal(ctx: Context, session: CaptureSession): JSONObject {
+        val grant = ProjectionHub.ensureProjection(ctx) { session.stopRequested.get() }
+        session.grant = grant
+        ensureRunning(session, grant)
+
         val (w, h, dpi) = displaySize(ctx)
-        val reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
-        currentReader = reader
-        val frames = LinkedBlockingQueue<Image>()
+        val reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, SHOT_QUEUE)
+        synchronized(session.resLock) { session.reader = reader }
+        val frames = ArrayBlockingQueue<Image>(SHOT_QUEUE)
+        session.frames = frames
         reader.setOnImageAvailableListener({ r ->
-            try {
-                r.acquireLatestImage()?.let { frames.offer(it) }
-            } catch (_: Exception) {
-            }
+            offerLatest(r, frames, session)
         }, mainHandler)
+
         var vd: VirtualDisplay? = null
         try {
-            vd = projection.createVirtualDisplay(
+            ensureRunning(session, grant)
+            vd = grant.projection.createVirtualDisplay(
                 "ghostd-shot", w, h, dpi,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 reader.surface, null, null
             )
-            currentDisplay = vd
-            val image = pollFrame(frames, FRAME_WAIT_S)
-                ?: throw Exception("screen capture timed out (no frame in ${FRAME_WAIT_S}s)")
+            synchronized(session.resLock) {
+                if (session.display == null) session.display = vd
+            }
+            val image = pollFrame(session, frames, FRAME_WAIT_MS)
+                ?: throw Exception(
+                    "screen capture timed out (no frame in ${FRAME_WAIT_MS / 1000}s)"
+                )
             try {
                 val bmp = toBitmap(image)
-                val png = ByteArrayOutputStream()
-                bmp.compress(Bitmap.CompressFormat.PNG, 100, png)
-                return JSONObject()
-                    .put("width", bmp.width)
-                    .put("height", bmp.height)
-                    .put("png_b64", Base64.encodeToString(png.toByteArray(), Base64.NO_WRAP))
+                try {
+                    val png = ByteArrayOutputStream()
+                    bmp.compress(Bitmap.CompressFormat.PNG, 100, png)
+                    return JSONObject()
+                        .put("width", bmp.width)
+                        .put("height", bmp.height)
+                        .put("png_b64", Base64.encodeToString(png.toByteArray(), Base64.NO_WRAP))
+                } finally {
+                    bmp.recycle()
+                }
             } finally {
                 image.close()
             }
         } finally {
-            currentDisplay = null
-            currentReader = null
-            vd?.release()
-            reader.close()
+            synchronized(session.resLock) {
+                if (session.display === vd) session.display = null
+                if (session.reader === reader) session.reader = null
+                if (session.frames === frames) session.frames = null
+                // Null before draining so a late callback (same lock) cannot
+                // enqueue into an already-drained queue.
+                drainQueue(frames)
+            }
+            // An earlier force-stop may already have released these; release
+            // calls are idempotent and wrapped so teardown never throws.
+            try {
+                vd?.release()
+            } catch (_: Exception) {
+            }
+            try {
+                reader.close()
+            } catch (_: Exception) {
+            }
         }
     }
 
@@ -139,129 +200,195 @@ object ScreenCapturer {
 
     /**
      * Stream the screen as MJPEG frames over the WebSocket.
-     * @param secs duration in seconds, or null for live (until [stop]).
+     * @param secs duration in seconds, or null for live (until [stop], a
+     *             MediaProjection revoke, or the cast indicator being stopped).
      */
-    fun stream(ctx: Context, ws: WebSocket, secs: Int?, fps: Int?, quality: Int?, streamName: String): JSONObject {
-        MediaBus.begin(MediaBus.SOURCE_SCREEN, ctx, ws)
-        // Projection grant may need a human tap: do it BEFORE starting the
-        // stream thread so the command response reflects grant failures.
-        // On failure the busy slot MUST be released again (0.2.8: leaked
-        // here before, wedging every later capture as "busy").
-        val projection = try {
-            ProjectionHub.ensureProjection(ctx)
+    fun stream(
+        ctx: Context, ws: WebSocket, secs: Int?, fps: Int?, quality: Int?,
+        streamName: String
+    ): JSONObject {
+        val session = newSession()
+        beginCapture(ctx, ws, session)
+
+        // Fresh grant per stream. On failure the busy slot and any partial
+        // projection state MUST be released before propagating the error.
+        val grant = try {
+            ProjectionHub.ensureProjection(ctx) { session.stopRequested.get() }
         } catch (e: Exception) {
-            MediaBus.end(MediaBus.SOURCE_SCREEN)
+            forceStopSession(session)
             throw e
         }
-        stopRequested = false
-        framesSent = 0L
-        val t = Thread {
+        session.grant = grant
+        if (session.stopRequested.get() || grant.stopped) {
+            forceStopSession(session)
+            throw Exception("screen $streamName: projection stopped before capture")
+        }
+
+        val worker = Thread {
             try {
-                runStream(ctx, projection, secs, fps, quality, streamName)
-            } catch (_: Exception) {
-                // stream died (socket gone or capture error); cleaned up below
+                runStream(ctx, session, grant, secs, fps, quality, streamName)
+            } catch (e: Exception) {
+                session.failure = e
             } finally {
-                MediaBus.end(MediaBus.SOURCE_SCREEN)
-                worker = null
+                finishSession(session)
             }
-        }.apply { name = "ghostd-screen"; isDaemon = true; start() }
-        worker = t
+        }.apply { name = "ghostd-screen"; isDaemon = true }
+        session.worker = worker
+        worker.start()
+
         // Do not report success before a frame actually exists: a live stream
-        // that silently produces nothing (projection revoked while locked, or
-        // the display was already used) used to look healthy in the console.
-        val t0 = System.currentTimeMillis()
-        while (framesSent == 0L && worker === t &&
-            System.currentTimeMillis() - t0 < FIRST_FRAME_WAIT_MS
-        ) {
+        // that silently produces nothing used to look healthy in the console.
+        val deadline = elapsedMs() + FIRST_FRAME_WAIT_MS
+        while (session.framesSent == 0L) {
+            if (session.stopRequested.get() || grant.stopped || !isCurrent(session)) break
+            if (elapsedMs() >= deadline) break
             try {
-                Thread.sleep(100)
+                Thread.sleep(FIRST_FRAME_POLL_MS)
             } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
                 break
             }
         }
-        if (framesSent == 0L) {
-            throw Exception(
-                "screen $streamName: no frames after ${FIRST_FRAME_WAIT_MS / 1000}s " +
+        if (session.framesSent == 0L) {
+            val reason = when {
+                session.stopRequested.get() -> "stopped"
+                grant.stopped -> "projection ended"
+                !isCurrent(session) ->
+                    session.failure?.message ?: "capture ended before the first frame"
+                session.failure != null -> "capture failed: ${session.failure?.message}"
+                else -> "no frames after ${FIRST_FRAME_WAIT_MS / 1000}s " +
                     "(projection not granted — unlock the phone and allow the " +
                     "screen-share prompt, then retry)"
-            )
+            }
+            // Required cleanup: worker, MediaBus slot and this projection.
+            forceStopSession(session)
+            throw Exception("screen $streamName: $reason")
         }
         return JSONObject()
             .put("stream", streamName)
             .put("started", true)
-            .put("frames", framesSent)
+            .put("frames", session.framesSent)
             .put("secs", secs ?: JSONObject.NULL)
     }
 
     private fun runStream(
-        ctx: Context, projection: MediaProjection,
-        secs: Int?, fps: Int?, quality: Int?,
-        streamName: String
+        ctx: Context, session: CaptureSession, grant: ProjectionHub.Grant,
+        secs: Int?, fps: Int?, quality: Int?, streamName: String
     ) {
         val (w, h, dpi) = displaySize(ctx)
         val preset = QualityPresets.get(null)
-        val effFps = QualityPresets.fpsOverride(fps) ?: preset.fps
+        val effFps = (QualityPresets.fpsOverride(fps) ?: preset.fps).coerceAtLeast(1)
         val effQ = QualityPresets.jpegQuality(quality ?: 60)
         val intervalMs = 1000L / effFps
 
-        val reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3)
-        currentReader = reader
-        val frames = LinkedBlockingQueue<Image>()
+        val reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, STREAM_QUEUE)
+        synchronized(session.resLock) { session.reader = reader }
+        val frames = ArrayBlockingQueue<Image>(STREAM_QUEUE)
+        session.frames = frames
         reader.setOnImageAvailableListener({ r ->
-            try {
-                r.acquireLatestImage()?.let { frames.offer(it) }
-            } catch (_: Exception) {
-            }
+            offerLatest(r, frames, session)
         }, mainHandler)
+
         var vd: VirtualDisplay? = null
         var sent = 0L
-        val last = longArrayOf(0L)
+        var last = 0L
+        var endReason = "done"
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         try {
-            vd = projection.createVirtualDisplay(
+            ensureRunning(session, grant)
+            vd = grant.projection.createVirtualDisplay(
                 "ghostd-stream", w, h, dpi,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 reader.surface, null, null
             )
-            currentDisplay = vd
-            MediaBus.streamStart(
-                streamName,
-                JSONObject()
-                    .put("width", w).put("height", h)
-                    .put("fps", effFps).put("quality", effQ)
-                    .put("encoding", "mjpeg")
-            )
-            val deadline = if (secs != null) System.currentTimeMillis() + secs * 1000L else Long.MAX_VALUE
-            while (!stopRequested && System.currentTimeMillis() < deadline) {
+            synchronized(session.resLock) {
+                if (session.display == null) session.display = vd
+            }
+            val announced = sendTextOwned(session) {
+                MediaBus.streamStart(
+                    streamName,
+                    JSONObject()
+                        .put("width", w).put("height", h)
+                        .put("fps", effFps).put("quality", effQ)
+                        .put("encoding", "mjpeg")
+                )
+            }
+            if (!announced) {
+                endReason = "superseded"
+                return
+            }
+
+            val deadline = if (secs != null) elapsedMs() + secs * 1000L else Long.MAX_VALUE
+            while (true) {
+                if (session.stopRequested.get()) {
+                    endReason = "stopped"
+                    break
+                }
+                if (grant.stopped) {
+                    // User stopped sharing from Android's cast UI.
+                    endReason = "projection stopped"
+                    break
+                }
+                if (!isCurrent(session)) {
+                    endReason = "superseded"
+                    break
+                }
+                if (elapsedMs() >= deadline) {
+                    endReason = if (secs != null) "done" else endReason
+                    break
+                }
                 // bounded + interruptible: screen stop breaks out of here
                 val image = try {
-                    frames.poll(500, TimeUnit.MILLISECONDS) ?: continue
+                    frames.poll(FRAME_POLL_MS, TimeUnit.MILLISECONDS) ?: continue
                 } catch (_: InterruptedException) {
+                    endReason = if (session.stopRequested.get()) "stopped" else "interrupted"
                     break
                 }
                 try {
-                    val now = System.currentTimeMillis()
-                    if (now - last[0] < intervalMs) continue
+                    if (session.stopRequested.get() || grant.stopped || !isCurrent(session)) {
+                        endReason = when {
+                            session.stopRequested.get() -> "stopped"
+                            grant.stopped -> "projection stopped"
+                            else -> "superseded"
+                        }
+                        break
+                    }
+                    val now = elapsedMs()
+                    if (now - last < intervalMs) continue
                     fillBitmap(image, bmp)
                     val jpeg = ByteArrayOutputStream()
                     bmp.compress(Bitmap.CompressFormat.JPEG, effQ, jpeg)
-                    last[0] = now
-                    if (!MediaBus.sendFrame(streamName, jpeg.toByteArray())) {
-                        MediaBus.streamEnd(streamName, sent, "socket closed")
-                        return
+                    last = now
+                    if (!sendFrameOwned(session, streamName, jpeg.toByteArray())) {
+                        endReason = "socket closed"
+                        break
                     }
                     sent++
-                    framesSent = sent
+                    session.framesSent = sent
                 } finally {
                     image.close()
                 }
             }
-            MediaBus.streamEnd(streamName, sent, if (stopRequested) "stopped" else "done")
+        } catch (e: Exception) {
+            endReason = "error: ${e.message}"
         } finally {
-            currentDisplay = null
-            currentReader = null
-            vd?.release()
-            reader.close()
+            sendTextOwned(session) { MediaBus.streamEnd(streamName, sent, endReason) }
+            synchronized(session.resLock) {
+                if (session.display === vd) session.display = null
+                if (session.reader === reader) session.reader = null
+                if (session.frames === frames) session.frames = null
+                // Null before draining so a late callback (same lock) cannot
+                // enqueue into an already-drained queue.
+                drainQueue(frames)
+            }
+            try {
+                vd?.release()
+            } catch (_: Exception) {
+            }
+            try {
+                reader.close()
+            } catch (_: Exception) {
+            }
             bmp.recycle()
         }
     }
@@ -269,71 +396,180 @@ object ScreenCapturer {
     // ------------------------------------------------------------------ stop
 
     /**
-     * Stop the active capture (stream or in-flight shot). Works even when
-     * the worker is wedged: interrupts it, tears down the virtual display /
-     * ImageReader and force-releases the busy slot if it does not exit on
-     * its own within a short grace period.
+     * Stop the active capture (stream or in-flight shot) and release its
+     * projection. Works even when the worker is wedged: wakes a shot waiter,
+     * interrupts the worker, tears down display/reader/queues and
+     * force-releases the busy slot.
      */
     fun stop(): JSONObject {
-        stopRequested = true
-        worker?.interrupt()
-        // Grace period: a healthy worker exits on its own (and can still
-        // deliver stream_end / its command result).
-        var waited = 0
-        while (worker != null && waited < STOP_GRACE_MS) {
-            try {
-                Thread.sleep(100)
-            } catch (_: InterruptedException) {
-                Thread.currentThread().interrupt()
-                break
+        val session = synchronized(lifecycle) { current }
+        if (session != null) {
+            session.stopRequested.set(true)
+            // Wake a shot() command thread immediately.
+            session.done.countDown()
+            session.worker?.interrupt()
+            // Grace period: a healthy worker exits on its own (and can still
+            // deliver stream_end / its command result).
+            joinWorker(session, STOP_GRACE_MS)
+            forceStopSession(session)
+        } else {
+            // Orphaned busy slot (e.g. a worker that died without cleanup).
+            synchronized(lifecycle) {
+                if (MediaBus.isActive(MediaBus.SOURCE_SCREEN)) {
+                    MediaBus.forceEnd(MediaBus.SOURCE_SCREEN)
+                }
             }
-            waited += 100
         }
-        if (worker != null || MediaBus.isActive(MediaBus.SOURCE_SCREEN)) {
-            // wedged worker or orphaned busy slot: hard teardown so the
-            // next capture can start
-            teardownWorker()
-            MediaBus.forceEnd(MediaBus.SOURCE_SCREEN)
-        }
+        // Per-capture lifecycle: stopping the capture always drops the
+        // projection too (the grant Intent/object is never reused).
+        ProjectionHub.stop()
         return JSONObject().put("stopping", MediaBus.SOURCE_SCREEN)
     }
 
+    /** Non-blocking capture stop for service destruction. */
     fun requestStopOnly() {
-        stopRequested = true
-        worker?.interrupt()
+        val session = synchronized(lifecycle) { current } ?: return
+        session.stopRequested.set(true)
+        session.done.countDown()
+        session.worker?.interrupt()
     }
 
-    /** Interrupt the worker and release its capture resources (idempotent). */
-    private fun teardownWorker() {
-        worker?.interrupt()
-        currentDisplay?.let { d ->
+    // --------------------------------------------------------- session state
+
+    private fun newSession(): CaptureSession = CaptureSession(genCounter.incrementAndGet())
+
+    /** Claim the MediaBus slot and publish this session atomically. */
+    private fun beginCapture(ctx: Context, ws: WebSocket?, session: CaptureSession) {
+        synchronized(lifecycle) {
+            MediaBus.begin(MediaBus.SOURCE_SCREEN, ctx, ws)
+            session.busOwned = true
+            current = session
+        }
+    }
+
+    /** Normal worker exit: release this session's bus slot and projection. */
+    private fun finishSession(session: CaptureSession) {
+        synchronized(lifecycle) {
+            releaseBusLocked(session, force = false)
+            if (current === session) current = null
+        }
+        releaseResources(session)
+        val grant = session.grant
+        session.grant = null
+        ProjectionHub.release(grant)
+    }
+
+    /**
+     * Forced teardown (timeout / stop / failed start): never touches a newer
+     * session; idempotent with the worker's own [finishSession].
+     */
+    private fun forceStopSession(session: CaptureSession) {
+        session.stopRequested.set(true)
+        session.worker?.interrupt()
+        session.done.countDown()
+        synchronized(lifecycle) {
+            releaseBusLocked(session, force = true)
+            if (current === session) current = null
+        }
+        releaseResources(session)
+        val grant = session.grant
+        session.grant = null
+        ProjectionHub.release(grant)
+    }
+
+    /** Caller must hold [lifecycle]. */
+    private fun releaseBusLocked(session: CaptureSession, force: Boolean) {
+        if (!session.busOwned) return
+        session.busOwned = false
+        if (force) {
+            MediaBus.forceEnd(MediaBus.SOURCE_SCREEN)
+        } else {
+            MediaBus.end(MediaBus.SOURCE_SCREEN)
+        }
+    }
+
+    /** Release display/reader/queue, closing and draining any queued image. */
+    private fun releaseResources(session: CaptureSession) {
+        synchronized(session.resLock) {
+            val display = session.display
+            session.display = null
             try {
-                d.release()
+                display?.release()
+            } catch (_: Exception) {
+            }
+            val reader = session.reader
+            session.reader = null
+            try {
+                reader?.close()
+            } catch (_: Exception) {
+            }
+            // Null the live queue BEFORE draining: a late ImageReader callback
+            // (which takes this same lock and checks identity) can then only
+            // close its image, never enqueue it into a queue nobody drains.
+            val frames = session.frames
+            session.frames = null
+            frames?.let { drainQueue(it) }
+        }
+    }
+
+    private fun joinWorker(session: CaptureSession, timeoutMs: Long) {
+        val worker = session.worker ?: return
+        if (worker === Thread.currentThread()) return
+        try {
+            worker.join(timeoutMs)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+    }
+
+    private fun isCurrent(session: CaptureSession): Boolean =
+        synchronized(lifecycle) { current === session }
+
+    private fun ensureRunning(session: CaptureSession, grant: ProjectionHub.Grant) {
+        if (session.stopRequested.get()) throw Exception("screen capture stopped")
+        if (grant.stopped) throw Exception("screen capture stopped (projection ended)")
+        if (!isCurrent(session)) throw Exception("screen capture superseded")
+    }
+
+    /** Answer/start/end/frame only while this session still owns the bus. */
+    private inline fun sendTextOwned(session: CaptureSession, block: () -> Unit): Boolean =
+        synchronized(lifecycle) {
+            if (current !== session) return false
+            block()
+            true
+        }
+
+    private fun sendFrameOwned(
+        session: CaptureSession, streamName: String, payload: ByteArray
+    ): Boolean = synchronized(lifecycle) {
+        if (current !== session) return false
+        MediaBus.sendFrame(streamName, payload)
+    }
+
+    /** Drain a bounded image queue, closing every queued Image. */
+    private fun drainQueue(frames: BlockingQueue<Image>) {
+        while (true) {
+            val image = frames.poll() ?: return
+            try {
+                image.close()
             } catch (_: Exception) {
             }
         }
-        currentDisplay = null
-        currentReader?.let { r ->
-            try {
-                r.close()
-            } catch (_: Exception) {
-            }
-        }
-        currentReader = null
     }
-
-    // ------------------------------------------------------------------ util
 
     /**
      * Bounded, interruptible and stop-aware frame wait. Throws when the
-     * capture was stopped/interrupted; returns null only on timeout.
+     * capture was stopped/interrupted or the projection ended; returns null
+     * only on timeout.
      */
-    private fun pollFrame(frames: LinkedBlockingQueue<Image>, timeoutS: Long): Image? {
-        val deadline = System.currentTimeMillis() + timeoutS * 1000
-        while (System.currentTimeMillis() < deadline) {
-            if (stopRequested) throw Exception("screen capture stopped")
+    private fun pollFrame(
+        session: CaptureSession, frames: BlockingQueue<Image>, timeoutMs: Long
+    ): Image? {
+        val deadline = elapsedMs() + timeoutMs
+        while (elapsedMs() < deadline) {
+            ensureRunning(session, session.grant ?: throw Exception("screen capture has no projection"))
             try {
-                frames.poll(250, TimeUnit.MILLISECONDS)?.let { return it }
+                frames.poll(FRAME_POLL_MS, TimeUnit.MILLISECONDS)?.let { return it }
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
                 throw Exception("screen capture interrupted (stopped)")
@@ -341,6 +577,45 @@ object ScreenCapturer {
         }
         return null
     }
+
+    /**
+     * Admission check for an ImageReader callback: a frame may only enter the
+     * queue while the session is running and still publishes exactly this
+     * queue. Evaluated under [CaptureSession.resLock]. Pure, so it is unit
+     * tested without an Android ImageReader.
+     */
+    internal fun frameQueueRegistered(
+        stopRequested: Boolean, registered: Any?, candidate: Any
+    ): Boolean = !stopRequested && registered === candidate
+
+    private fun offerLatest(
+        reader: ImageReader, frames: BlockingQueue<Image>, session: CaptureSession
+    ) {
+        val image = try {
+            reader.acquireLatestImage()
+        } catch (_: Exception) {
+            null
+        } ?: return
+        // Teardown nulls the queue and drains it under resLock. Holding the
+        // same lock here means a frame acquired concurrently either enters
+        // before teardown (and is drained) or is rejected and closed -- never
+        // orphaned in a queue that is no longer reachable.
+        val queued = synchronized(session.resLock) {
+            if (frameQueueRegistered(session.stopRequested.get(), session.frames, frames)) {
+                frames.offer(image)
+            } else {
+                false
+            }
+        }
+        if (!queued) {
+            try {
+                image.close()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ util
 
     private fun displaySize(ctx: Context): Triple<Int, Int, Int> {
         val wm = ctx.getSystemService(WindowManager::class.java)
@@ -381,15 +656,25 @@ object ScreenCapturer {
         bmp.setPixels(pixels, 0, bmp.width, 0, 0, bmp.width, bmp.height)
     }
 
+    private fun elapsedMs(): Long = SystemClock.elapsedRealtime()
+
     /** Hard budget for the whole shot (grant wait + frame + encode). */
-    private const val SHOT_BUDGET_S = 135L
+    private const val SHOT_BUDGET_MS = 135_000L
 
     /** How long `screen live` waits for its first frame before reporting failure. */
     private const val FIRST_FRAME_WAIT_MS = 8_000L
 
     /** Max wait for the first (single-frame) frame. */
-    private const val FRAME_WAIT_S = 10L
+    private const val FRAME_WAIT_MS = 10_000L
 
     /** How long stop() waits for a healthy worker to exit by itself. */
-    private const val STOP_GRACE_MS = 2_000
+    private const val STOP_GRACE_MS = 2_000L
+
+    /** Bounded frame poll while waiting for stop / projection revoke. */
+    private const val FRAME_POLL_MS = 500L
+    private const val FIRST_FRAME_POLL_MS = 100L
+
+    /** Bounded image queues: excess frames are closed, not accumulated. */
+    private const val SHOT_QUEUE = 2
+    private const val STREAM_QUEUE = 3
 }

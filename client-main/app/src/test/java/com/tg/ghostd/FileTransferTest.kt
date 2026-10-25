@@ -5,6 +5,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
+import java.io.File
 
 class FileTransferTest {
 
@@ -88,5 +89,67 @@ class FileTransferTest {
         val (h, p) = FileTransfer.parseFrame(frame)!!
         assertEquals("file_end", h.optString("type"))
         assertEquals(0, p.size)
+    }
+
+    // ---------------------------------------- outgoing transfer cmd_id binding
+
+    @Test fun sendFileIncludesCmdIdInEveryFrame() {
+        val tmp = File.createTempFile("ghostd-ft", ".bin")
+        try {
+            val data = ByteArray(FileTransfer.CHUNK_SIZE + 128) { (it % 251).toByte() }
+            tmp.writeBytes(data)
+            val texts = mutableListOf<JSONObject>()
+            val chunks = mutableListOf<JSONObject>()
+            FileTransfer.sendFile(
+                tmp.absolutePath, "cmd-abc123", "/sdcard/Download/x.bin",
+                sendText = { texts.add(JSONObject(it)) },
+                sendBinary = { frame ->
+                    val (h, _) = FileTransfer.parseFrame(frame)!!
+                    chunks.add(h)
+                }
+            )
+            assertEquals(2, texts.size)
+            assertEquals("file_start", texts[0].optString("type"))
+            assertEquals("cmd-abc123", texts[0].optString("cmd_id"))
+            assertEquals("file_end", texts[1].optString("type"))
+            assertEquals("cmd-abc123", texts[1].optString("cmd_id"))
+            assertEquals(2, chunks.size)
+            for (h in chunks) {
+                assertEquals("file_chunk", h.optString("type"))
+                assertEquals("cmd-abc123", h.optString("cmd_id"))
+            }
+        } finally {
+            tmp.delete()
+        }
+    }
+
+    @Test fun sendFileBindsCmdIdForEmptyFile() {
+        val tmp = File.createTempFile("ghostd-ft", ".bin")
+        try {
+            val texts = mutableListOf<JSONObject>()
+            FileTransfer.sendFile(
+                tmp.absolutePath, "cmd-empty", null,
+                sendText = { texts.add(JSONObject(it)) },
+                sendBinary = { }
+            )
+            assertEquals(2, texts.size)
+            assertEquals("cmd-empty", texts[0].optString("cmd_id"))
+            assertEquals("cmd-empty", texts[1].optString("cmd_id"))
+            assertEquals(0L, texts[1].optLong("bytes"))
+            assertEquals(0L, texts[1].optLong("chunks"))
+        } finally {
+            tmp.delete()
+        }
+    }
+
+    @Test fun sendFileRejectsMissingFile() {
+        try {
+            FileTransfer.sendFile(
+                "/definitely/not/here", "cmd", null,
+                sendText = { }, sendBinary = { })
+            org.junit.Assert.fail("expected an exception")
+        } catch (e: Exception) {
+            org.junit.Assert.assertTrue(e.message!!.contains("no such file"))
+        }
     }
 }

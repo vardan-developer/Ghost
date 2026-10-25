@@ -25,6 +25,15 @@ class FileReceiverTest {
     private fun sha256Of(payload: ByteArray): String =
         FileTransfer.toHex(MessageDigest.getInstance("SHA-256").digest(payload))
 
+    /** Invoke the private fail(t, msg) hook to simulate an obsolete waiter. */
+    private fun invokeFail(t: FileReceiver.Transfer, msg: String) {
+        val method = FileReceiver::class.java.getDeclaredMethod(
+            "fail", FileReceiver.Transfer::class.java, String::class.java
+        )
+        method.isAccessible = true
+        method.invoke(FileReceiver, t, msg)
+    }
+
     private fun endHeader(
         dest: File,
         cmdId: String,
@@ -206,5 +215,84 @@ class FileReceiverTest {
         }
         assertFalse("part file must be deleted on failure", part.exists())
         assertFalse("destination must not be created on failure", dest.exists())
+    }
+
+    @Test
+    fun `obsolete waiter cannot delete replacement part after completed transfer`() {
+        val dest = File(dir, "completed-replace.bin")
+        val first = "first payload".toByteArray()
+        val second = "second payload".toByteArray()
+        val cmd1 = "cmd-first"
+        val cmd2 = "cmd-second"
+
+        // Complete transfer 1 and move its .part to dest.
+        val t1 = FileReceiver.prepare(dest.path, cmd1, owner)
+        FileReceiver.onChunk(
+            JSONObject().put("path", dest.path).put("cmd_id", cmd1)
+                .put("total", first.size), first
+        )
+        FileReceiver.onEnd(endHeader(dest, cmd1, first))
+        assertArrayEquals(first, dest.readBytes())
+
+        // Replacement on the same path creates a new .part at the same path.
+        val t2 = FileReceiver.prepare(dest.path, cmd2, owner)
+        val part = File(dest.path + ".part")
+        assertTrue("replacement .part should exist", part.exists())
+
+        // An obsolete waiter now times out/interrupts for the completed t1.
+        // It must not delete t2's shared .part or mark t1 failed.
+        invokeFail(t1, "timed out after completion")
+
+        assertTrue("replacement .part must survive obsolete cleanup", part.exists())
+        assertEquals("completed transfer must not gain an error", null, t1.error)
+        val r1 = FileReceiver.await(t1)
+        assertEquals(first.size.toLong(), r1.getLong("bytes"))
+
+        // The replacement still completes normally and wins the destination.
+        FileReceiver.onChunk(
+            JSONObject().put("path", dest.path).put("cmd_id", cmd2)
+                .put("total", second.size), second
+        )
+        FileReceiver.onEnd(endHeader(dest, cmd2, second))
+        val r2 = FileReceiver.await(t2)
+        assertEquals(second.size.toLong(), r2.getLong("bytes"))
+        assertArrayEquals(second, dest.readBytes())
+    }
+
+    @Test
+    fun `obsolete waiter cannot delete replacement part after superseded transfer`() {
+        val dest = File(dir, "superseded-replace.bin")
+        val second = "second payload".toByteArray()
+        val cmd1 = "cmd-first"
+        val cmd2 = "cmd-second"
+
+        val t1 = FileReceiver.prepare(dest.path, cmd1, owner)
+        // Make t1 stale so prepare() reclaims the slot for t2.
+        t1.lastActivity = System.currentTimeMillis() - 60_000L
+        val t2 = FileReceiver.prepare(dest.path, cmd2, owner)
+        val part = File(dest.path + ".part")
+        assertTrue("replacement .part should exist", part.exists())
+        assertTrue(
+            "superseded transfer should be failed",
+            t1.error != null && t1.error!!.contains("superseded")
+        )
+
+        // An obsolete waiter for t1 now times out/interrupts.
+        invokeFail(t1, "timed out after supersede")
+
+        assertTrue("replacement .part must survive obsolete cleanup", part.exists())
+        assertTrue(
+            "supersede error must be preserved",
+            t1.error != null && t1.error!!.contains("superseded")
+        )
+
+        FileReceiver.onChunk(
+            JSONObject().put("path", dest.path).put("cmd_id", cmd2)
+                .put("total", second.size), second
+        )
+        FileReceiver.onEnd(endHeader(dest, cmd2, second))
+        val r2 = FileReceiver.await(t2)
+        assertEquals(second.size.toLong(), r2.getLong("bytes"))
+        assertArrayEquals(second, dest.readBytes())
     }
 }

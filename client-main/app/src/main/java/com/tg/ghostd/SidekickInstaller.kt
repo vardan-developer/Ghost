@@ -53,6 +53,7 @@ object SidekickInstaller {
         // installed before); otherwise the confirm+auto-tap fallback.
         return AppUpdater.installApk(
             ctx, apkPath,
+            expectedPackage = AppUpdater.SIDEKICK_PACKAGE,
             requireNoUserAction = AppUpdater.isInstallerOfRecord(
                 ctx, AppUpdater.SIDEKICK_PACKAGE
             ),
@@ -89,36 +90,52 @@ object SidekickInstaller {
      * `sidekick reinstall` invokes this with force=true.
      *
      * Blocks until the final install status (see AppUpdater.installApk).
+     * Extract + version decision + install run under the shared install lock,
+     * so overlapping service-start/wizard provisioning and an operator
+     * `update sidekick` cannot stage or observe each other's session.
      */
-    fun provisionBundled(ctx: Context, force: Boolean = false): JSONObject {
-        val apk = extractBundledApk(ctx)
-        val installed = AppUpdater.installedVersionName(ctx, AppUpdater.SIDEKICK_PACKAGE)
-        val bundled = AppUpdater.apkVersionName(ctx, apk.absolutePath)
-        if (!force && installed != null &&
-            (bundled == null || !VersionInfo.isNewer(bundled, installed))
-        ) {
-            // Present and not older than the bundle: nothing to do.
-            return JSONObject()
-                .put("status", "up-to-date")
-                .put("installed_version", installed)
-                .put("bundled_version", bundled ?: "?")
-        }
-        // Maximize the hands-free path: arm the sidekick so it auto-taps the
-        // confirm dialog (no-op when ghosta isn't installed yet — first run).
-        try {
-            SidekickLink.send(JSONObject().put("cmd", "arm"))
-        } catch (_: Exception) {
-        }
-        val res = AppUpdater.installApk(
-            ctx, apk.absolutePath,
-            requireNoUserAction = AppUpdater.isInstallerOfRecord(
+    fun provisionBundled(ctx: Context, force: Boolean = false): JSONObject =
+        AppUpdater.withInstallLock {
+            val apk = extractBundledApk(ctx)
+            val installedVersion = AppUpdater.installedVersionName(
                 ctx, AppUpdater.SIDEKICK_PACKAGE
-            ),
-            sessionName = "ghosta"
-        )
-        return res.put("old_version", installed ?: "not installed")
-            .put("bundled_version", bundled ?: "?")
-    }
+            )
+            val installedCode = AppUpdater.installedVersionCode(
+                ctx, AppUpdater.SIDEKICK_PACKAGE
+            )
+            val bundledVersion = AppUpdater.apkVersionName(ctx, apk.absolutePath)
+            val bundledCode = AppUpdater.apkVersionCode(ctx, apk.absolutePath)
+            // versionName is display-only. Order by longVersionCode: a
+            // same-name rebuild with a higher code must update, and a higher
+            // display name with an older code must not be attempted.
+            if (!force && !VersionInfo.shouldProvisionBundled(bundledCode, installedCode)) {
+                return@withInstallLock JSONObject()
+                    .put("status", "up-to-date")
+                    .put("installed_version", installedVersion ?: "not installed")
+                    .put("installed_version_code", installedCode ?: -1L)
+                    .put("bundled_version", bundledVersion ?: "?")
+                    .put("bundled_version_code", bundledCode ?: -1L)
+            }
+            // Maximize the hands-free path: arm the sidekick so it auto-taps
+            // the confirm dialog (no-op when ghosta isn't installed yet —
+            // first run).
+            try {
+                SidekickLink.send(JSONObject().put("cmd", "arm"))
+            } catch (_: Exception) {
+            }
+            val res = AppUpdater.installApk(
+                ctx, apk.absolutePath,
+                expectedPackage = AppUpdater.SIDEKICK_PACKAGE,
+                requireNoUserAction = AppUpdater.isInstallerOfRecord(
+                    ctx, AppUpdater.SIDEKICK_PACKAGE
+                ),
+                sessionName = "ghosta"
+            )
+            res.put("old_version", installedVersion ?: "not installed")
+                .put("old_version_code", installedCode ?: -1L)
+                .put("bundled_version", bundledVersion ?: "?")
+                .put("bundled_version_code", bundledCode ?: -1L)
+        }
 
     /**
      * Fire-and-forget provisionBundled on a background thread; status is

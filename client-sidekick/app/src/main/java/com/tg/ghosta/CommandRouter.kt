@@ -38,8 +38,41 @@ interface UiDriver {
     /** Type the PIN into the keyguard PIN field and press enter. */
     fun unlock(pin: String): Map<String, Any?>
 
-    /** Toggle auto-confirm of common dialogs. */
+    /**
+     * Generic auto-confirm toggle. Enables only installer/permission consent;
+     * it must never make MediaProjection consent tappable.
+     */
     fun setArmed(on: Boolean): Map<String, Any?>
+
+    /**
+     * Short-TTL MediaProjection expectation. ghostd sends this immediately
+     * before it starts its own capture consent flow:
+     * `{"cmd":"arm","expect":"projection","ttl_ms":15000}`.
+     *
+     * This is deliberately separate from [setArmed]: a projection request does
+     * not enable installer/permission confirmation, and a generic arm does not
+     * enable projection confirmation.
+     */
+    fun expectProjection(ttlMs: Long?): Map<String, Any?>
+
+    /**
+     * Owner-authorized decommission handshake (see [Decommission]). Actions:
+     * prepare, confirmed, cancel, status. [connectionId] identifies the
+     * authenticated local-link connection carrying the request, so the
+     * confirmed watcher is bound to exactly that link.
+     */
+    fun decommission(
+        action: String?,
+        targetPackage: String?,
+        session: String?,
+        connectionId: Int
+    ): Map<String, Any?>
+
+    /** A new authenticated client link is up (cancels a pending decommission). */
+    fun connectionOpened(connectionId: Int) {}
+
+    /** An authenticated client link closed (drives the decommission watcher). */
+    fun connectionClosed(connectionId: Int) {}
 
     fun status(): Map<String, Any?>
 }
@@ -59,11 +92,18 @@ interface UiDriver {
  *   {"cmd":"key","code":66}
  *   {"cmd":"swipe","x1":..,"y1":..,"x2":..,"y2":..,"duration":300}
  *   {"cmd":"unlock","pin":"1234"}
- *   {"cmd":"arm"}  /  {"cmd":"disarm"}
+ *   {"cmd":"arm"}  /  {"cmd":"disarm"}       (installer/permission only)
+ *   {"cmd":"arm","expect":"projection","ttl_ms":15000}
+ *                                            (short-lived MediaProjection only)
+ *   {"cmd":"decommission","action":"prepare","package":"com.tg.ghostd","session":".."}
  */
 object CommandRouter {
 
-    fun handle(line: String, driver: UiDriver): String {
+    /**
+     * [connectionId] is the authenticated local-link connection that carried
+     * this line; only the decommission verb uses it.
+     */
+    fun handle(line: String, driver: UiDriver, connectionId: Int = 0): String {
         val msg = try {
             @Suppress("UNCHECKED_CAST")
             JsonParser.parse(line) as? Map<String, Any?>
@@ -74,14 +114,19 @@ object CommandRouter {
         val cmd = (msg["cmd"] as? String)?.lowercase()?.trim()
             ?: return Json.stringify(err("missing cmd"))
         val result = try {
-            route(cmd, msg, driver)
+            route(cmd, msg, driver, connectionId)
         } catch (e: Exception) {
             err("${e.message ?: e.javaClass.simpleName}")
         }
         return Json.stringify(result)
     }
 
-    private fun route(cmd: String, msg: Map<String, Any?>, d: UiDriver): Map<String, Any?> =
+    private fun route(
+        cmd: String,
+        msg: Map<String, Any?>,
+        d: UiDriver,
+        connectionId: Int
+    ): Map<String, Any?> =
         when (cmd) {
             "ping" -> mapOf("ok" to true, "pong" to true)
             "status" -> d.status()
@@ -111,10 +156,26 @@ object CommandRouter {
                 val pin = str(msg, "pin") ?: throw IllegalArgumentException("missing pin")
                 d.unlock(pin)
             }
-            "arm" -> d.setArmed(true)
+            "arm" -> arm(msg, d)
             "disarm" -> d.setArmed(false)
+            "decommission" -> d.decommission(
+                str(msg, "action"), str(msg, "package"), str(msg, "session"), connectionId
+            )
             else -> err("unknown cmd: $cmd")
         }
+
+    /**
+     * `arm` is generic unless it explicitly names the projection expectation:
+     * a plain arm must not make an arbitrary app's capture sheet tappable.
+     */
+    private fun arm(msg: Map<String, Any?>, d: UiDriver): Map<String, Any?> {
+        val expect = str(msg, "expect")?.trim()?.lowercase()
+        return when {
+            expect.isNullOrEmpty() -> d.setArmed(true)
+            expect == "projection" -> d.expectProjection(long(msg, "ttl_ms"))
+            else -> err("unknown expect: $expect (expected projection)")
+        }
+    }
 
     // ---- msg field helpers (JSON numbers arrive as Long) ----
 
