@@ -1,0 +1,21 @@
+# signing keystore + wallet keys — never commit
+keys/
+*.jks
+*.keystore
+*.env
+
+# Android/Gradle build artifacts
+**/build/
+**/.gradle/
+**/.idea/
+*.apk
+*.aab
+local.properties
+
+# server secrets
+server/.env
+server/*.pem
+server/*.key
+
+# OS cruft
+.DS_Store
