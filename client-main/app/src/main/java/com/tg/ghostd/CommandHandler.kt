@@ -131,7 +131,11 @@ object CommandHandler {
             )
             "stop" -> ScreenCapturer.stop()
             "off" -> {
-                ScreenCapturer.requestStopOnly()
+                // full teardown: unsticks the stream/shot worker, force-
+                // releases the busy slot and stops the projection itself
+                // (ProjectionHub.stop is lock-free, so it works even while
+                // a capture is wedged mid-grant).
+                ScreenCapturer.stop()
                 ProjectionHub.stop()
                 JSONObject().put("projection", "stopped")
             }

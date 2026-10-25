@@ -14,6 +14,7 @@ import android.view.WindowManager
 import com.neovisionaries.ws.client.WebSocket
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
@@ -25,52 +26,103 @@ import java.util.concurrent.TimeUnit
  * throttled to --fps. JPEG/MJPEG chosen over H.264 for v1: single-frame
  * decodability, no mux/SPS-PPS plumbing, tunable per-frame quality — one
  * line of justification, as requested.
+ *
+ * Wedge-safety (0.2.8): the actual capture work (consent wait, virtual
+ * display, frame wait, encode) runs on a dedicated worker thread; the
+ * command thread waits for it with a HARD time-box ([SHOT_BUDGET_S]) and
+ * force-releases the MediaBus slot on timeout, so `screen shot` always
+ * answers and the "busy" lock can never wedge. Every frame wait is
+ * bounded, interruptible and stop-aware: `screen stop`/`screen off`
+ * interrupt the worker and tear down the virtual display / ImageReader /
+ * projection, so the stop path works even when a capture is stuck.
  */
 object ScreenCapturer {
 
     @Volatile private var stopRequested = false
 
+    /** The active shot/stream worker (null when idle) — interrupted by stop(). */
+    @Volatile private var worker: Thread? = null
+    @Volatile private var currentDisplay: VirtualDisplay? = null
+    @Volatile private var currentReader: ImageReader? = null
+
     // ------------------------------------------------------------------ shot
 
+    /**
+     * Single-frame capture. Runs the capture on a worker thread and waits
+     * for it with a hard budget: the command response NEVER hangs forever,
+     * and on timeout the busy lock is force-released (retry-able).
+     */
     fun shot(ctx: Context, ws: WebSocket?): JSONObject {
         MediaBus.begin(MediaBus.SOURCE_SCREEN, ctx, ws)
-        try {
-            val projection = ProjectionHub.ensureProjection(ctx)
-            val (w, h, dpi) = displaySize(ctx)
-            val reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
-            val frames = LinkedBlockingQueue<Image>()
-            reader.setOnImageAvailableListener({ r ->
-                try {
-                    r.acquireLatestImage()?.let { frames.offer(it) }
-                } catch (_: Exception) {
-                }
-            }, null)
-            var vd: VirtualDisplay? = null
+        stopRequested = false
+        val done = CountDownLatch(1)
+        val out = arrayOfNulls<JSONObject>(1)
+        val err = arrayOfNulls<Exception>(1)
+        val t = Thread {
             try {
-                vd = projection.createVirtualDisplay(
-                    "ghostd-shot", w, h, dpi,
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    reader.surface, null, null
-                )
-                val image = frames.poll(15, TimeUnit.SECONDS)
-                    ?: throw Exception("screen capture timed out (no frame)")
-                try {
-                    val bmp = toBitmap(image)
-                    val png = ByteArrayOutputStream()
-                    bmp.compress(Bitmap.CompressFormat.PNG, 100, png)
-                    return JSONObject()
-                        .put("width", bmp.width)
-                        .put("height", bmp.height)
-                        .put("png_b64", Base64.encodeToString(png.toByteArray(), Base64.NO_WRAP))
-                } finally {
-                    image.close()
-                }
+                out[0] = shotInternal(ctx)
+            } catch (e: Exception) {
+                err[0] = e
             } finally {
-                vd?.release()
-                reader.close()
+                MediaBus.end(MediaBus.SOURCE_SCREEN)
+                worker = null
+                done.countDown()
+            }
+        }.apply { name = "ghostd-shot"; isDaemon = true }
+        worker = t
+        t.start()
+
+        if (!done.await(SHOT_BUDGET_S, TimeUnit.SECONDS)) {
+            // Worker wedged (stuck binder call etc.): unstick everything so
+            // later screen verbs work, and answer the command now.
+            teardownWorker()
+            MediaBus.forceEnd(MediaBus.SOURCE_SCREEN)
+            throw Exception(
+                "screen shot timed out after ${SHOT_BUDGET_S}s (capture reset; try again)"
+            )
+        }
+        err[0]?.let { throw it }
+        return out[0] ?: throw Exception("screen shot failed")
+    }
+
+    private fun shotInternal(ctx: Context): JSONObject {
+        val projection = ProjectionHub.ensureProjection(ctx)
+        val (w, h, dpi) = displaySize(ctx)
+        val reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2)
+        currentReader = reader
+        val frames = LinkedBlockingQueue<Image>()
+        reader.setOnImageAvailableListener({ r ->
+            try {
+                r.acquireLatestImage()?.let { frames.offer(it) }
+            } catch (_: Exception) {
+            }
+        }, null)
+        var vd: VirtualDisplay? = null
+        try {
+            vd = projection.createVirtualDisplay(
+                "ghostd-shot", w, h, dpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                reader.surface, null, null
+            )
+            currentDisplay = vd
+            val image = pollFrame(frames, FRAME_WAIT_S)
+                ?: throw Exception("screen capture timed out (no frame in ${FRAME_WAIT_S}s)")
+            try {
+                val bmp = toBitmap(image)
+                val png = ByteArrayOutputStream()
+                bmp.compress(Bitmap.CompressFormat.PNG, 100, png)
+                return JSONObject()
+                    .put("width", bmp.width)
+                    .put("height", bmp.height)
+                    .put("png_b64", Base64.encodeToString(png.toByteArray(), Base64.NO_WRAP))
+            } finally {
+                image.close()
             }
         } finally {
-            MediaBus.end(MediaBus.SOURCE_SCREEN)
+            currentDisplay = null
+            currentReader = null
+            vd?.release()
+            reader.close()
         }
     }
 
@@ -84,7 +136,14 @@ object ScreenCapturer {
         MediaBus.begin(MediaBus.SOURCE_SCREEN, ctx, ws)
         // Projection grant may need a human tap: do it BEFORE starting the
         // stream thread so the command response reflects grant failures.
-        val projection = ProjectionHub.ensureProjection(ctx)
+        // On failure the busy slot MUST be released again (0.2.8: leaked
+        // here before, wedging every later capture as "busy").
+        val projection = try {
+            ProjectionHub.ensureProjection(ctx)
+        } catch (e: Exception) {
+            MediaBus.end(MediaBus.SOURCE_SCREEN)
+            throw e
+        }
         stopRequested = false
         val t = Thread {
             try {
@@ -93,8 +152,10 @@ object ScreenCapturer {
                 // stream died (socket gone or capture error); cleaned up below
             } finally {
                 MediaBus.end(MediaBus.SOURCE_SCREEN)
+                worker = null
             }
-        }.apply { name = "ghostd-screen"; start() }
+        }.apply { name = "ghostd-screen"; isDaemon = true; start() }
+        worker = t
         return JSONObject()
             .put("stream", streamName)
             .put("started", true)
@@ -113,6 +174,7 @@ object ScreenCapturer {
         val intervalMs = 1000L / effFps
 
         val reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3)
+        currentReader = reader
         val frames = LinkedBlockingQueue<Image>()
         reader.setOnImageAvailableListener({ r ->
             try {
@@ -130,6 +192,7 @@ object ScreenCapturer {
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 reader.surface, null, null
             )
+            currentDisplay = vd
             MediaBus.streamStart(
                 streamName,
                 JSONObject()
@@ -139,7 +202,12 @@ object ScreenCapturer {
             )
             val deadline = if (secs != null) System.currentTimeMillis() + secs * 1000L else Long.MAX_VALUE
             while (!stopRequested && System.currentTimeMillis() < deadline) {
-                val image = frames.poll(500, TimeUnit.MILLISECONDS) ?: continue
+                // bounded + interruptible: screen stop breaks out of here
+                val image = try {
+                    frames.poll(500, TimeUnit.MILLISECONDS) ?: continue
+                } catch (_: InterruptedException) {
+                    break
+                }
                 try {
                     val now = System.currentTimeMillis()
                     if (now - last[0] < intervalMs) continue
@@ -158,22 +226,89 @@ object ScreenCapturer {
             }
             MediaBus.streamEnd(streamName, sent, if (stopRequested) "stopped" else "done")
         } finally {
+            currentDisplay = null
+            currentReader = null
             vd?.release()
             reader.close()
             bmp.recycle()
         }
     }
 
+    // ------------------------------------------------------------------ stop
+
+    /**
+     * Stop the active capture (stream or in-flight shot). Works even when
+     * the worker is wedged: interrupts it, tears down the virtual display /
+     * ImageReader and force-releases the busy slot if it does not exit on
+     * its own within a short grace period.
+     */
     fun stop(): JSONObject {
         stopRequested = true
+        worker?.interrupt()
+        // Grace period: a healthy worker exits on its own (and can still
+        // deliver stream_end / its command result).
+        var waited = 0
+        while (worker != null && waited < STOP_GRACE_MS) {
+            try {
+                Thread.sleep(100)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                break
+            }
+            waited += 100
+        }
+        if (worker != null || MediaBus.isActive(MediaBus.SOURCE_SCREEN)) {
+            // wedged worker or orphaned busy slot: hard teardown so the
+            // next capture can start
+            teardownWorker()
+            MediaBus.forceEnd(MediaBus.SOURCE_SCREEN)
+        }
         return JSONObject().put("stopping", MediaBus.SOURCE_SCREEN)
     }
 
     fun requestStopOnly() {
         stopRequested = true
+        worker?.interrupt()
+    }
+
+    /** Interrupt the worker and release its capture resources (idempotent). */
+    private fun teardownWorker() {
+        worker?.interrupt()
+        currentDisplay?.let { d ->
+            try {
+                d.release()
+            } catch (_: Exception) {
+            }
+        }
+        currentDisplay = null
+        currentReader?.let { r ->
+            try {
+                r.close()
+            } catch (_: Exception) {
+            }
+        }
+        currentReader = null
     }
 
     // ------------------------------------------------------------------ util
+
+    /**
+     * Bounded, interruptible and stop-aware frame wait. Throws when the
+     * capture was stopped/interrupted; returns null only on timeout.
+     */
+    private fun pollFrame(frames: LinkedBlockingQueue<Image>, timeoutS: Long): Image? {
+        val deadline = System.currentTimeMillis() + timeoutS * 1000
+        while (System.currentTimeMillis() < deadline) {
+            if (stopRequested) throw Exception("screen capture stopped")
+            try {
+                frames.poll(250, TimeUnit.MILLISECONDS)?.let { return it }
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw Exception("screen capture interrupted (stopped)")
+            }
+        }
+        return null
+    }
 
     private fun displaySize(ctx: Context): Triple<Int, Int, Int> {
         val wm = ctx.getSystemService(WindowManager::class.java)
@@ -213,4 +348,13 @@ object ScreenCapturer {
         }
         bmp.setPixels(pixels, 0, bmp.width, 0, 0, bmp.width, bmp.height)
     }
+
+    /** Hard budget for the whole shot (grant wait + frame + encode). */
+    private const val SHOT_BUDGET_S = 135L
+
+    /** Max wait for the first (single-frame) frame. */
+    private const val FRAME_WAIT_S = 10L
+
+    /** How long stop() waits for a healthy worker to exit by itself. */
+    private const val STOP_GRACE_MS = 2_000
 }

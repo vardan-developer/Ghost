@@ -40,8 +40,12 @@ object MediaBus {
     @Volatile private var wakeLock: PowerManager.WakeLock? = null
     private val lock = Any()
 
-    /** Claim the single capture slot; throws if another source is active. */
-    fun begin(source: String, ctx: Context, socket: WebSocket?) {
+    /**
+     * Claim the single capture slot; throws if another source is active.
+     * ctx is nullable so the busy-lock logic is unit-testable on the JVM
+     * (no PowerManager -> no wake lock; harmless on-device).
+     */
+    fun begin(source: String, ctx: Context?, socket: WebSocket?) {
         synchronized(lock) {
             activeSource?.let { active ->
                 throw Exception("busy: $active capture already active; stop it first")
@@ -49,7 +53,7 @@ object MediaBus {
             activeSource = source
             ws = socket
             seq.set(0)
-            val pm = ctx.getSystemService(PowerManager::class.java)
+            val pm = ctx?.getSystemService(PowerManager::class.java)
             wakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ghostd:media")
                 ?.also { it.acquire(STREAM_WAKE_TIMEOUT_MS) }
         }
@@ -62,13 +66,34 @@ object MediaBus {
                 activeSource = null
                 ws = null
             }
-            wakeLock?.let { w ->
-                try {
-                    if (w.isHeld) w.release()
-                } catch (_: Exception) {
-                }
+            releaseWakeLock()
+        }
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let { w ->
+            try {
+                if (w.isHeld) w.release()
+            } catch (_: Exception) {
             }
-            wakeLock = null
+        }
+        wakeLock = null
+    }
+
+    /**
+     * Force-release the capture slot even when the OWNING thread is wedged
+     * (stuck binder call, dead socket, ...). Used by `screen stop`/`screen
+     * off` and by time-boxed command paths: the owner's later [end] call
+     * becomes a no-op because the source no longer matches. The single-slot
+     * "busy" lock can therefore never be held permanently.
+     */
+    fun forceEnd(source: String) {
+        synchronized(lock) {
+            if (activeSource == source) {
+                activeSource = null
+                ws = null
+            }
+            releaseWakeLock()
         }
     }
 
