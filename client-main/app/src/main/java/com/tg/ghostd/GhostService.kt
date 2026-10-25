@@ -36,7 +36,18 @@ class GhostService : Service() {
         super.onCreate()
         instance = this
         CommandHandler.init(this)
-        startForeground(NOTIFICATION_ID, buildNotification())
+        // Start with ONLY the dataSync type: the manifest also declares
+        // mediaProjection (promoted later via promoteToProjection()), and the
+        // 2-arg startForeground would try to start ALL declared types —
+        // mediaProjection without consent throws SecurityException on 14+.
+        if (Build.VERSION.SDK_INT >= 29) {
+            startForeground(
+                NOTIFICATION_ID, buildNotification(),
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, buildNotification())
+        }
         // Auto-arm the sidekick once the link is up (after setup); the
         // sidekick resets armed state on reboot, so ghostd re-arms on every
         // (re)connect. Fire-and-forget, retried by the link watcher.
