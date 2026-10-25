@@ -109,7 +109,7 @@ class TestConsole(unittest.TestCase):
         self.assertIn("www-authenticate", headers)
         self.assertEqual(headers.get("x-frame-options"), "DENY")
         self.assertEqual(headers.get("x-content-type-options"), "nosniff")
-        self.assertEqual(headers.get("referrer-policy"), "no-referrer")
+        self.assertEqual(headers.get("referrer-policy"), "same-origin")
         self.assertEqual(headers.get("cache-control"), "no-store")
         self.assertNotIn("python", headers.get("server", "").lower())
 

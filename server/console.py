@@ -11,7 +11,7 @@ Security:
     hidden form field; Origin/Referer verification when supplied
   * Unguessable stream tokens for feed GETs
   * Strict path parsing (unquote + validate device ids)
-  * CSP, X-Frame-Options DENY, nosniff, Referrer-Policy no-referrer,
+  * CSP, X-Frame-Options DENY, nosniff, Referrer-Policy same-origin,
     Cache-Control no-store on all responses (including 401)
   * Python server header suppressed
   * Content-Length strict 0..64MiB for uploads, 1MiB otherwise
@@ -490,7 +490,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Frame-Options", "DENY")
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Referrer-Policy", "same-origin")
             if SCHEME == "https":
                 self.send_header("Strict-Transport-Security",
                                  "max-age=31536000")
@@ -565,7 +565,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Referrer-Policy", "same-origin")
         if SCHEME == "https":
             self.send_header("Strict-Transport-Security", "max-age=31536000")
         self.send_header("Content-Security-Policy",
