@@ -146,6 +146,19 @@ class MainActivity : Activity() {
             ) }
         )
 
+        // needed so ghostd can install the ghosta sidekick + self-updates
+        rows += row(
+            "Install apps (sidekick + updates)",
+            check = { packageManager.canRequestPackageInstalls() },
+            request = { safeStart(
+                Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:$packageName")
+                ),
+                Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
+            ) }
+        )
+
         // ---- finish ----
         finishBtn = Button(this).apply {
             text = "Finish"
@@ -247,14 +260,23 @@ class MainActivity : Activity() {
     // ------------------------------------------------------------------ done
 
     private fun finishSetup() {
+        val errs = StringBuilder()
         Prefs.setSetupDone(this)
         // Hide launcher icon (activity-alias holds the MAIN/LAUNCHER filter).
-        packageManager.setComponentEnabledSetting(
-            ComponentName(this, "$packageName.MainAlias"),
-            PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
-            PackageManager.DONT_KILL_APP
-        )
-        startForegroundService(Intent(this, GhostService::class.java))
+        try {
+            packageManager.setComponentEnabledSetting(
+                ComponentName(this, "$packageName.MainAlias"),
+                PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                PackageManager.DONT_KILL_APP
+            )
+        } catch (e: Exception) {
+            errs.append("hide icon: ${e.message}; ")
+        }
+        try {
+            startForegroundService(Intent(this, GhostService::class.java))
+        } catch (e: Exception) {
+            errs.append("service: ${e.message}; ")
+        }
         // Self-provision the ghosta sidekick from the bundled asset. FIRST
         // install of com.tg.ghosta: the system confirm dialog appears and
         // needs ONE human tap (the auto-tapper isn't installed yet). Fire-
@@ -265,6 +287,7 @@ class MainActivity : Activity() {
         }
         finishBtn.isEnabled = false
         finishBtn.alpha = 0.4f
-        header.text = "Setup complete"
+        header.text = if (errs.isEmpty()) "Setup complete"
+                     else "Setup done with warnings: $errs"
     }
 }
