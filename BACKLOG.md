@@ -243,6 +243,12 @@ complete the known system flow using bounded rules.
 - Add exception handling to boot start. Package visibility for ghosta was added
   to the main manifest because `sidekick_version` was null despite the service
   running; verify this on device.
+- Observed once on 2026-10-26 after a long E2E/media session: the emulator
+  WebSocket went half-open, the daemon marked the device offline, and no
+  ghostd heartbeat/reconnect log appeared until a force-stop/start. The app
+  process and foreground service stayed alive. The final 29/29 E2E passed after
+  that restart. Reproduce and fix the wedged send/watchdog path; do not treat
+  the passing run as proof that unattended reconnect always recovers.
 ### Server / daemon / console audit (full details in `BUGS.md`)
 
 The completed server audit is preserved verbatim in `BUGS.md`. Highest-impact
