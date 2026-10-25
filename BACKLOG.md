@@ -10,26 +10,27 @@ Last updated: 2026-10-26.
 
 - Physical test phone: **Pixel 10a**, approved and controllable. It must remain untouched during current local/emulator work.
 - Phone currently reports **ghostd 0.3.8**. Working tree is **ghostd 0.4.1 / ghosta 0.2.1**.
-- **Local full verification now passes:** 249 server unit tests + `py_compile`, 154 ghostd unit tests, 115 ghosta unit tests, and release builds.
+- **Local full verification now passes:** 254 server unit tests + `py_compile`, 154 ghostd unit tests, 115 ghosta unit tests, and release builds.
 - **Emulator:** Runs 0.4.1/0.2.1. Full E2E is **29/29 ALL GREEN**. Stored-PIN
   unlock, locked-screen consent, fresh grants, reboot recovery and two-app
   Remove Device also passed. The emulator was restored to an approved,
   working state after the removal test.
-- **Kali server:** Updated. Daemon runs normally; the console runs native HTTPS
-  on :9443 with a self-signed IP certificate (expires 2029-01-27). External TLS
-  and an authenticated CSRF-protected POST passed; plain HTTP is rejected.
-- The original e2e run passed 17/22 checks. Failures were:
-  - incorrect test invocation for volume (test fixed to `volume set media N`);
-  - interrupted/wedged file push and dependent file get;
-  - camera blocked by the phone's global camera-access policy;
-  - live screen produced no cached frames after projection consent/reuse failed.
+- **Kali server:** Daemon runs normally. The console runs the previous native
+  HTTPS build on :9443 with a self-signed IP certificate (expires 2029-01-27);
+  external TLS and an authenticated CSRF-protected POST passed, and plain HTTP
+  is rejected. The worker-thread TLS hardening still needs redeployment.
+- Historical first e2e run (superseded by the 29/29 result above) passed 17/22
+  checks. Its failures were: a wrong volume test invocation, an interrupted
+  file push, the phone's camera-access policy, and live screen producing no
+  frames. Do not treat these as current blockers.
 - `device info`, `status`, `sms recent`, `loc once`, `hide`, `unhide`,
   `files abort` and `restart` passed on the emulator. `sms recent` is not yet
   proven on the Pixel. SMS send, contacts and call-log readers remain
   unimplemented. Remove Device passed the complete two-app uninstall flow.
-- Console is implemented with dashboard, settings, file management, CSRF
-  protection, admin auth, and secure password handling. Password comes
-  from gitignored `server/.env`; never commit it.
+- The console backend and pages are implemented with dashboard, settings,
+  file management, CSRF protection, admin auth and secure password handling.
+  Browser UI gaps are listed below. The password comes from gitignored
+  `server/.env`; never commit it.
 - Device rename works in daemon, CLI and console. `-d` accepts a full ID, an
   unambiguous ID prefix, or a device name.
 
@@ -41,10 +42,22 @@ Last updated: 2026-10-26.
    reader and worker on stop/timeout).
 3. Replace localhost shared-secret-only peer trust with LocalSocket + peer UID
    and package-signature validation without breaking partial upgrades.
-4. Replace the console's self-signed IP certificate with a CA-issued one and
+4. Console backend TLS hardening is implemented and locally tested
+   (worker-thread handshakes, bounded handshake concurrency/timeout, startup
+   validation before password generation, key-permission check, HSTS/Secure
+   cookie, `Origin: null` rejection). Rebuild/restart Kali, then re-verify
+   external TLS and an authenticated CSRF POST.
+5. Finish the remaining console UI fixes: populate device model/sidekick
+   fields from daemon state and wire live screen start/polling. The isolated
+   UI branch now sends URL-encoded upload cancellation and accurately leaves
+   download progress to the browser; it still needs integration/deployment.
+   Review on a real phone browser.
+6. Add approved-device pagination/output caps to admin list/pending paths and
+   finish endpoint-cache/reconnect hardening.
+7. Replace the console's self-signed IP certificate with a CA-issued one and
    rotate credentials. Deploy device-transport TLS before changing clients to
    `wss://`, then rotate exposed device credentials.
-5. OTA limitation is verified: ghosta installed but its command timed out;
+8. OTA limitation is verified: ghosta installed but its command timed out;
    ghostd self-update was blocked by Play Protect verification. Do not bypass
    that protection or claim unattended fleet OTA is ready.
 
@@ -281,11 +294,12 @@ verification passed on the emulator. The console now runs native HTTPS, but its
 IP certificate is self-signed; device-transport TLS, production permissions and
 the explicitly listed hardening gaps remain open.
 
-## Keep the screen awake during control — source implemented
+## Keep the screen awake during control — implemented and unit-tested
 
-Implemented in **ghostd**, not ghosta, with unit tests; emulator verification is
-pending. The controller expires after two minutes without command/frame
-activity and releases on the last session, disconnect or service destruction.
+Implemented in **ghostd**, not ghosta. The controller expires after two minutes
+without command/frame activity and releases on the last session, disconnect or
+service destruction. JVM tests cover acquisition, sharing and release. The
+29/29 E2E run does not include a dedicated two-minute idle-expiry assertion.
 
 - While an operator command/session is active, acquire a bounded screen wake
   lock so consent/UI automation does not race the display turning off.
@@ -316,22 +330,22 @@ details and verification limits are in the final review section of `BUGS.md`.
 - **Downloads and CLI uploads — fixed and emulator-verified.** Device chunks
   and ends are `cmd_id`-bound; the daemon validates path, sequence, counts and
   SHA-256, and both put/get passed with byte and hash comparison.
-- **Shell deadlock — source fix present, not retested in this review:** stdout
-  and stderr now drain separately and execution/output are bounded.
-- **Failed operation envelopes — source fix present, not device-tested:**
-  `resultEnvelope` now propagates explicit payload `ok:false`.
-- **Device aliases — addressed in current CLI:** command/update paths now
-  resolve IDs; mocked update-by-name invocation passed in this review.
-- **E2E directory — source fix present:** `BASE` now derives from `__file__`.
-  The suite still needs a real device run.
-- **Late `.part` cleanup — source fix present, not retested in this review:**
-  terminal-state and pending-identity guards now protect replacement uploads.
+- **Shell deadlock — fixed, unit-tested and passed the 29/29 emulator E2E.**
+  stdout and stderr now drain separately and execution/output are bounded.
+- **Failed operation envelopes — fixed with unit coverage:** `resultEnvelope`
+  propagates explicit payload `ok:false`. The E2E suite does not include a
+  dedicated negative-action assertion.
+- **Device aliases — addressed and covered in the CLI:** command/update paths
+  resolve IDs, prefixes and assigned names.
+- **E2E directory — fixed and device-verified:** `BASE` derives from
+  `__file__`, and the portable suite ran 29/29 on the emulator.
+- **Late `.part` cleanup — fixed and unit-tested:** terminal-state and
+  pending-identity guards protect replacement uploads; no open race is known.
 
-Verification: isolated Python mocks reproduced raw name forwarding and the
-non-streaming upload request; the actual daemon binary handler discarded a
-synthetic download chunk; the hardcoded e2e directory was confirmed absent.
-Android findings are static code findings; no device commands or deployment
-were performed and Android tests were not rerun.
+Verification: the historical mocked checks above were followed by the current
+unit suites and the 29/29 emulator run. Android unit tests and release builds
+pass. Remaining device-dependent limits are listed in the next-step section,
+not in this point-in-time review.
 
 ### Unattended-update audit — source fixes; Play Protect limitation verified
 
@@ -415,7 +429,8 @@ do not bypass Play Protect or treat these tests as a successful self-update.
 
 - Branch: `codex/console-visuals`, created from committed `main` in the managed
   `console-visuals` worktree. UI development stops at the user's requested
-  integration checkpoint; merge the latest committed main into this branch.
+  integration checkpoint. Main commit `e9a8397` is merged into this branch;
+  the original main checkout and its uncommitted work remain untouched.
 - Angular dark/red styling, IBM Plex Mono and Lucide icons are bundled into
   existing UI assets, with source/license attribution in `server/ui_assets/`.
   No external asset requests, new asset routes or CSP changes are required.
@@ -448,37 +463,43 @@ do not bypass Play Protect or treat these tests as a successful self-update.
   downloads still accept spaces. Device model/sidekick persistence and live-screen
   polling/start remain unresolved. No Android or backend logic was authored in
   this UI change; backend updates come only from merging main.
-- Not pushed or deployed. Stop after integrating main and rerunning checks.
+- Not pushed or deployed. Post-merge checks are recorded below; no further UI development is planned in this run.
 
-## Web console status (implemented and deployed)
+## Web console — backend deployed, UI fixes pending
 
-The console is redesigned and deployed as an operator dashboard. Kali serves
-HTTPS-only and returns HTTP 200 over TLS; external TLS plus an authenticated
-CSRF-protected device command passed. Plain HTTP on :9443 is rejected. Route/API
-tests pass and dashboard/device/settings/remove smoke checks passed. Security includes admin
-auth, token redaction, HTTP Basic over TLS, CSRF (including `Origin: null` only
-with a valid token), request limits, CSP and stream tokens. Native TLS supports
-`--certfile`/`--keyfile`. Remaining: trust a CA-issued certificate instead of
-the self-signed IP certificate and review on a real phone-sized browser.
+Kali serves the console HTTPS-only and returns HTTP 200 over TLS; external TLS
+plus an authenticated CSRF-protected device command passed. Plain HTTP on :9443
+is rejected. Backend route/API tests pass and dashboard/device/settings/remove
+smoke checks passed. Security includes admin auth, token redaction, HTTP Basic
+over TLS, CSRF (now rejecting `Origin: null` even with a valid token), request
+limits, CSP and stream tokens. Native TLS supports `--certfile`/`--keyfile`,
+worker-thread handshakes, a bounded handshake timeout/concurrency cap, a
+mode-600 key check, HSTS and a `Secure` CSRF cookie. The hardened source still
+needs redeployment and external re-verification.
 
-Implemented features:
+The HTTP backend is implemented; the browser UI is not fully verified:
 
-- Responsive device cards/table with assigned name, model, online/approval
-  state, app/sidekick versions, battery, IP and last-seen age.
-- Search/filter and clear pending-approval actions; keep rename prominent.
-- A device page with grouped actions (Files, Screen, UI, Media, System), recent
+- Device cards render, but model and sidekick version stay `-` because the
+  daemon does not persist those hello fields.
+- The live-screen page does not start polling, and its Start action posts to a
+  result page instead of a usable live view.
+- The isolated UI branch fixes Upload Cancel to use URL-encoded data for
+  `/files/abort`; that source/browser-verified change is not deployed.
+  In-page download progress/abort is not implemented or claimed in the UI.
+- A real phone-sized browser and accessibility review remains.
+
+Working backend/browser pieces:
+
+- Search/filter and pending-approval actions, with rename.
+- Device pages with grouped actions (Files, Screen, UI, Media, System), recent
   command history, elapsed/pending state, and readable success/error output.
-- Live screen view with explicit start/stop and frame/stream health; never show
-  a stale cached frame as though it were live.
-- File upload/download progress and transfer errors, including cancellation.
 - Safe confirmation for revoke/restart/update/destroy-like actions; no PIN or
   bearer-token display in pages, logs or browser history.
-- Settings page for enrollment flood caps and console preferences, using the
-  existing daemon config API. Preserve HTTP Basic authentication and CSRF
-  protection for state-changing routes.
-- Implementation stays small: server-rendered pages plus vanilla JS, with no
-  framework or CDN. Route/API tests are done; a real phone-sized browser and
-  desktop accessibility review remains.
+- Settings page for enrollment flood caps, using the daemon config API.
+- Server-rendered pages plus vanilla JS, with no framework or CDN.
+
+Keep the console UI/JS/markup and its UI tests with the separate UI worktree;
+avoid concurrent edits to `server/console.py` from that worktree.
 
 ## Documentation / release checklist
 

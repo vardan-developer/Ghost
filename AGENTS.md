@@ -38,18 +38,21 @@ Android permissions, indicators and owner-controlled setup.
 
 ## Current status (2026-10-26)
 
-- Local full verification: 249 server unit tests + `py_compile`, 154 ghostd unit tests, and 115 ghosta unit tests pass. Release builds pass.
+- Local full verification: 254 server unit tests + `py_compile`, 154 ghostd unit tests, and 115 ghosta unit tests pass. Release builds pass.
 - Emulator runs ghostd 0.4.1 / ghosta 0.2.1: full E2E is 29/29; locked/unlocked consent, stored-PIN unlock, reboot recovery and two-app Remove Device also passed.
-- Kali daemon and HTTPS-only console are updated and running. External TLS and an authenticated CSRF-protected POST passed; plain HTTP on :9443 is rejected. Pixel test device was not touched.
+- Kali daemon and HTTPS-only console are running. External TLS and an authenticated CSRF-protected POST passed; plain HTTP on :9443 is rejected. The newer worker-thread TLS hardening (handshake isolation, bounded timeout/concurrency, startup/key-permission checks, HSTS/Secure cookie, `Origin: null` rejection) is source-tested but not yet redeployed. Pixel test device was not touched.
 - OTA limitation: ghosta 0.2.1 installed but its command timed out; ghostd self-update was blocked by Play Protect verification. Do not bypass that protection.
 
 ## Remaining work (not release-verified)
 
 - Fleet OTA: ghostd self-update is blocked by Play Protect; ghosta installed
   after a command timeout. Do not claim unattended OTA success.
-- Console: native HTTPS is implemented and running on Kali with a self-signed
-  IP certificate. Install a CA-issued certificate and rotate credentials.
-  Device transport still needs WSS/TLS.
+- Console: native HTTPS runs on Kali with a self-signed IP certificate. Deploy
+  the hardened `server/console.py`, install a CA-issued certificate and rotate
+  credentials. Device transport still needs WSS/TLS.
+- Console UI (separate worktree): device model/sidekick fields do not populate;
+  live-screen start/polling is not wired; upload Cancel sends the wrong body
+  type; download progress/abort is missing. Do not claim these are complete.
 - Finish the older camera/mic resource-ownership audit, approved-device
   pagination/cap hardening, and endpoint cache/reconnect hardening.
 - Replace localhost shared-secret-only trust with LocalSocket + peer UID and

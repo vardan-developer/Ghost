@@ -19,9 +19,12 @@ Security:
   * Socket read/write timeouts; broken-pipe handling
   * Password never printed to stdout; generated password written to mode 600
     console.pass for loopback binds; GHOST_CONSOLE_PASS required otherwise
+  * Native TLS (1.2+) with worker-thread handshakes and a bounded handshake
+    timeout; Secure CSRF cookie and HSTS when HTTPS is active
   * Non-loopback HTTP refused unless GHOST_CONSOLE_ALLOW_HTTP=1
 
 Run:  python3 console.py [--host 127.0.0.1] [--port 9443]
+      [--certfile console.crt --keyfile console.key]
 """
 import argparse
 import base64
@@ -69,6 +72,7 @@ import console_ui as ui  # noqa: E402
 # ---------------------------------------------------------------------------
 CSRF_TOKEN = secrets.token_urlsafe(32)
 CSRF_FAILED = "CSRF check failed: reload this page and retry"
+SCHEME = "http"             # set to "https" when native TLS is enabled
 AUTH_FAILURES = {}          # ip -> [count, last_fail_ts]
 AUTH_LOCK = threading.Lock()
 MAX_AUTH_FAILURES = 10
@@ -77,6 +81,7 @@ MAX_AUTH_ENTRIES = 1024     # hard cap on tracked source IPs
 
 REQUEST_SEM = threading.BoundedSemaphore(64)
 STREAM_SEM = threading.BoundedSemaphore(4)
+TLS_HANDSHAKE_SEM = threading.BoundedSemaphore(32)
 STREAM_TOKENS = {}          # token -> (device_id, expires_ts)
 STREAM_TOKENS_LOCK = threading.Lock()
 STREAM_TOKEN_TTL = 300.0    # seconds
@@ -482,6 +487,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("X-Frame-Options", "DENY")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
+            if SCHEME == "https":
+                self.send_header("Strict-Transport-Security",
+                                 "max-age=31536000")
             self.send_header(
                 "Content-Security-Policy",
                 "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
@@ -498,7 +506,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_header(
                         "Set-Cookie",
                         f"csrf_token={CSRF_TOKEN}; HttpOnly; SameSite=Strict; "
-                        f"Path=/; Max-Age=86400")
+                        f"Path=/; Max-Age=86400"
+                        + ("; Secure" if SCHEME == "https" else ""))
             if extra_headers:
                 for k, v in extra_headers.items():
                     self.send_header(k, v)
@@ -553,6 +562,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        if SCHEME == "https":
+            self.send_header("Strict-Transport-Security", "max-age=31536000")
         self.send_header("Content-Security-Policy",
                          "default-src 'none'; frame-ancestors 'none'")
         self.end_headers()
@@ -569,9 +580,11 @@ class Handler(BaseHTTPRequestHandler):
         host = self.headers.get("Host", "")
         allowed = set()
         if host:
-            allowed.add(f"http://{host}")
-            allowed.add(f"https://{host}")
-        if origin and origin != "null" and origin not in allowed:
+            allowed.add(f"{SCHEME}://{host}")
+            # A TLS reverse proxy may front a loopback plain-HTTP console.
+            if SCHEME != "https":
+                allowed.add(f"https://{host}")
+        if origin and origin not in allowed:
             return False
         if not origin and referer:
             ok = False
@@ -1071,7 +1084,7 @@ def _device_by_id(did):
 # Startup / password handling
 # ---------------------------------------------------------------------------
 def _is_loopback(host):
-    return host in ("127.0.0.1", "::1", "localhost", "")
+    return host in ("127.0.0.1", "::1", "localhost")
 
 
 def _resolve_password(host):
@@ -1097,13 +1110,61 @@ def _resolve_password(host):
     return pw
 
 
-def enable_tls(httpd, certfile, keyfile):
-    """Wrap the console socket for native HTTPS with an operator-supplied cert."""
-    context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+def _tls_context(certfile, keyfile):
+    """Build a server TLS context, refusing a group/world-readable key."""
+    try:
+        mode = os.stat(keyfile).st_mode
+    except OSError as ex:
+        raise ValueError(f"cannot read TLS keyfile: {ex.strerror or ex}") from ex
+    if mode & 0o077:
+        raise ValueError("TLS keyfile must not be group/world-readable "
+                         "(chmod 600)")
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(certfile=certfile, keyfile=keyfile)
-    httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+    return context
+
+
+def enable_tls(httpd, context):
+    """Enable native HTTPS on a TLSServer using a prevalidated context."""
+    httpd.tls_context = context
+    global SCHEME
+    SCHEME = "https"
     return "https"
+
+
+class TLSServer(ThreadingHTTPServer):
+    """Handshake in the worker thread so an idle TCP client cannot stall accept."""
+    tls_context = None
+
+    def get_request(self):
+        # Never wrap the listening socket: SSLSocket.accept() would perform
+        # the handshake in the accept loop.
+        return self.socket.accept()
+
+    def finish_request(self, request, client_address):
+        context = self.tls_context
+        if context is None:
+            return super().finish_request(request, client_address)
+        try:
+            request.settimeout(10)
+        except OSError:
+            pass
+        if not TLS_HANDSHAKE_SEM.acquire(blocking=False):
+            return
+        try:
+            tls = context.wrap_socket(request, server_side=True)
+        except (ssl.SSLError, OSError):
+            return
+        finally:
+            TLS_HANDSHAKE_SEM.release()
+        try:
+            super().finish_request(tls, client_address)
+        finally:
+            try:
+                tls.close()
+            except OSError:
+                pass
 
 
 def main():
@@ -1116,13 +1177,18 @@ def main():
     ap.add_argument("--keyfile", help="private key PEM for native HTTPS")
     a = ap.parse_args()
 
-    _secure_log_file()
-
-    global PASSWORD
-    PASSWORD = _resolve_password(a.host)
-
+    # An empty host means INADDR_ANY to socketserver, not loopback.
+    if not a.host:
+        a.host = "127.0.0.1"
     if bool(a.certfile) != bool(a.keyfile):
         sys.exit("HTTPS requires both --certfile and --keyfile")
+
+    tls_context = None
+    if a.certfile:
+        try:
+            tls_context = _tls_context(a.certfile, a.keyfile)
+        except (ssl.SSLError, OSError, ValueError) as ex:
+            sys.exit(f"TLS setup failed: {ex}")
     if not _is_loopback(a.host) and not a.certfile:
         allow_http = os.environ.get("GHOST_CONSOLE_ALLOW_HTTP") == "1"
         if not allow_http:
@@ -1132,8 +1198,13 @@ def main():
         _log(f"WARNING: serving plain HTTP on non-loopback {a.host} "
              f"(GHOST_CONSOLE_ALLOW_HTTP=1)")
 
-    httpd = ThreadingHTTPServer((a.host, a.port), Handler)
-    scheme = enable_tls(httpd, a.certfile, a.keyfile) if a.certfile else "http"
+    _secure_log_file()
+
+    global PASSWORD
+    PASSWORD = _resolve_password(a.host)
+
+    httpd = TLSServer((a.host, a.port), Handler)
+    scheme = enable_tls(httpd, tls_context) if tls_context else "http"
     _log(f"ghostctl console listening on {scheme}://{a.host}:{a.port}")
     if _is_loopback(a.host) and not os.environ.get("GHOST_CONSOLE_PASS"):
         _log(f"generated password written to {BASE / 'console.pass'} (mode 600)")

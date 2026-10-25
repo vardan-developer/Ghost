@@ -6,7 +6,12 @@ import base64
 import http.client
 import json
 import os
+import shutil
+import socket
+import ssl
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 from types import SimpleNamespace
@@ -39,6 +44,7 @@ class TestConsole(unittest.TestCase):
 
     def setUp(self):
         console.AUTH_FAILURES.clear()
+        console.SCHEME = "http"
 
     # ------------------------------------------------------------ helpers --
     def auth_header(self, password=TEST_PASS):
@@ -174,16 +180,13 @@ class TestConsole(unittest.TestCase):
                 headers={"Origin": f"http://127.0.0.1:{self.port}"})
             self.assertEqual(status, 200)
 
-    def test_csrf_null_origin_requires_valid_token(self):
-        with patch("console._rpc", return_value={"ok": True}):
+    def test_csrf_null_origin_is_rejected_even_with_valid_token(self):
+        with patch("console._rpc", return_value={"ok": True}) as m:
             status, _, _ = self.request(
                 "POST", "/device/abc/approve", body=f"csrf_token={TEST_CSRF}",
                 headers={"Origin": "null"})
-            self.assertEqual(status, 200)
-            status, _, _ = self.request(
-                "POST", "/device/abc/approve", body="csrf_token=wrong",
-                headers={"Origin": "null"})
             self.assertEqual(status, 403)
+            m.assert_not_called()
 
     def test_csrf_stale_cookie_is_refreshed(self):
         # A restart changes CSRF_TOKEN; a stale cookie must not pin the
@@ -210,16 +213,130 @@ class TestConsole(unittest.TestCase):
                 headers={"Origin": f"http://127.0.0.1:{self.port}"})
         self.assertEqual(status, 200)
 
-    def test_native_tls_wraps_socket(self):
-        ctx = SimpleNamespace(
-            load_cert_chain=lambda certfile, keyfile: None,
-            wrap_socket=lambda sock, server_side: "wrapped")
-        server = SimpleNamespace(socket=object())
-        with patch("console.ssl.create_default_context", return_value=ctx) as factory:
-            scheme = console.enable_tls(server, "cert.pem", "key.pem")
+    def test_enable_tls_keeps_listener_unwrapped(self):
+        listener = object()
+        server = SimpleNamespace(socket=listener, tls_context=None)
+        context = object()
+        previous = console.SCHEME
+        try:
+            scheme = console.enable_tls(server, context)
+        finally:
+            console.SCHEME = previous
         self.assertEqual(scheme, "https")
-        self.assertEqual(server.socket, "wrapped")
-        factory.assert_called_once()
+        self.assertIs(server.socket, listener)
+        self.assertIs(server.tls_context, context)
+
+    def test_tls_context_rejects_unsafe_key_permissions(self):
+        with tempfile.TemporaryDirectory() as td:
+            cert = os.path.join(td, "cert.pem")
+            key = os.path.join(td, "key.pem")
+            for path in (cert, key):
+                with open(path, "w", encoding="ascii") as f:
+                    f.write("not a real key")
+            os.chmod(key, 0o644)
+            with self.assertRaisesRegex(ValueError, "group/world-readable"):
+                console._tls_context(cert, key)
+
+    def test_empty_host_is_not_loopback(self):
+        self.assertFalse(console._is_loopback(""))
+        self.assertTrue(console._is_loopback("127.0.0.1"))
+
+    def test_main_validates_tls_before_password_and_bind(self):
+        argv = ["console.py", "--host", "127.0.0.1", "--port", "0",
+                "--certfile", "/nonexistent/console.crt",
+                "--keyfile", "/nonexistent/console.key"]
+        failures = AssertionError("must not run after TLS setup failed")
+        with patch.object(sys, "argv", argv), \
+                patch.object(console, "_resolve_password", side_effect=failures), \
+                patch.object(console, "TLSServer", side_effect=failures):
+            with self.assertRaises(SystemExit) as raised:
+                console.main()
+        self.assertNotEqual(raised.exception.code, 0)
+
+    def test_bad_tls_setup_fails_without_traceback(self):
+        env = os.environ.copy()
+        env["GHOST_CONSOLE_PASS"] = "testpass"
+        proc = subprocess.run(
+            [sys.executable, os.path.join(os.path.dirname(__file__), "console.py"),
+             "--host", "127.0.0.1", "--port", "0",
+             "--certfile", "/nonexistent/console.crt",
+             "--keyfile", "/nonexistent/console.key"],
+            capture_output=True, text=True, timeout=15, env=env)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("TLS setup failed", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    @unittest.skipUnless(shutil.which("openssl"), "openssl required")
+    def test_tls_handshake_worker_and_https_policy(self):
+        with tempfile.TemporaryDirectory() as td:
+            cert = os.path.join(td, "cert.pem")
+            key = os.path.join(td, "key.pem")
+            subprocess.run(
+                ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-sha256",
+                 "-nodes", "-days", "1", "-keyout", key, "-out", cert,
+                 "-subj", "/CN=127.0.0.1",
+                 "-addext", "subjectAltName=IP:127.0.0.1"],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            os.chmod(key, 0o600)
+            context = console._tls_context(cert, key)
+            httpd = console.TLSServer(("127.0.0.1", 0), console.Handler)
+            httpd.tls_context = context
+            console.SCHEME = "https"
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            port = httpd.server_address[1]
+            idle = None
+            try:
+                # A client that never sends a TLS byte must not block the
+                # accept loop or a second HTTPS request.
+                idle = socket.create_connection(("127.0.0.1", port), timeout=5)
+                started = time.monotonic()
+                conn = http.client.HTTPSConnection(
+                    "127.0.0.1", port, timeout=5,
+                    context=ssl._create_unverified_context())
+                conn.request("GET", "/",
+                             headers={"Authorization": self.auth_header()})
+                resp = conn.getresponse()
+                body = resp.read()
+                elapsed = time.monotonic() - started
+                headers = {k.lower(): v for k, v in resp.getheaders()}
+                conn.close()
+                self.assertEqual(resp.status, 200, body[:200])
+                self.assertIn("max-age=31536000",
+                              headers.get("strict-transport-security", ""))
+                self.assertIn("secure", headers.get("set-cookie", "").lower())
+                self.assertLess(elapsed, 2.0)
+
+                unauth = http.client.HTTPSConnection(
+                    "127.0.0.1", port, timeout=5,
+                    context=ssl._create_unverified_context())
+                unauth.request("GET", "/")
+                resp = unauth.getresponse()
+                resp.read()
+                headers = {k.lower(): v for k, v in resp.getheaders()}
+                unauth.close()
+                self.assertEqual(resp.status, 401)
+                self.assertIn("max-age=31536000",
+                              headers.get("strict-transport-security", ""))
+
+                # Plain HTTP to the TLS port must never produce HTTP output.
+                plain = socket.create_connection(("127.0.0.1", port), timeout=5)
+                try:
+                    plain.sendall(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                    plain.settimeout(3)
+                    try:
+                        first = plain.recv(256)
+                    except (ConnectionResetError, socket.timeout):
+                        first = b""
+                    self.assertFalse(first.startswith(b"HTTP/"))
+                finally:
+                    plain.close()
+            finally:
+                if idle is not None:
+                    idle.close()
+                httpd.shutdown()
+                httpd.server_close()
+                console.SCHEME = "http"
 
     # ------------------------------------------------------ path / xss ----
     def test_path_injection(self):

@@ -27,7 +27,7 @@ Three components:
 |---|---|---|
 | **ghostd** ("System Service") | `client-main/` | Android app installed on each managed device. Foreground service, WebSocket client, all device verbs. |
 | **ghosta** ("Display Helper") | `client-sidekick/` | Small helper app on the same device. Accessibility service used for UI automation (dump/tap/type) and dialog auto-confirmation. Talks to ghostd over localhost TCP only. |
-| **server** | `server/` | Python daemon (device WebSocket + admin RPC), `ghostctl.py` CLI, and a small web console. |
+| **server** | `server/` | Python daemon (device WebSocket + admin RPC), `ghostctl.py` CLI, and an operator web console. |
 
 Deployment flow:
 
@@ -83,12 +83,14 @@ cat .env
 #   GHOST_MAX_PER_IP=5
 
 python3 daemon.py          # devices ws://0.0.0.0:8443, admin 127.0.0.1:8444
-python3 console.py --host 0.0.0.0 --certfile console.crt --keyfile console.key
-# web console on https://0.0.0.0:9443 (password from .env / console.pass)
+GHOST_CONSOLE_PASS=... python3 console.py --host 0.0.0.0 \
+  --certfile console.crt --keyfile console.key
+# web console at https://SERVER_IP:9443 (non-loopback requires an explicit password)
 ```
 
-Open the firewall for the device port (8443/tcp) and the console port if you
-want remote access to it. All admin surfaces are localhost-bound by default.
+Open the firewall for the device port (8443/tcp) and the console port only if
+you need remote access to it; do not expose the daemon admin port. All admin
+surfaces are localhost-bound by default, and the private key must be mode 600.
 
 ### CLI (`server/ghostctl.py`)
 
@@ -120,25 +122,30 @@ Everything outputs JSON (scriptable); `--pretty` for humans.
 
 ### Web console (`server/console.py`)
 
-A password-protected, CSRF-protected operator dashboard on :9443. The UI is
-responsive and includes device cards with model/version/battery/IP/last-seen,
-search/filter and pending approvals; grouped Files, Screen, UI, Media and
-System actions; readable history/results; live-screen start/stop with frame-age
-health; upload/download progress and abort; flood-cap settings; and Remove
-Device without a second confirmation. It also has token redaction, CSP,
-request limits and stream tokens. Native HTTPS is available with
-`--certfile`/`--keyfile`; non-loopback HTTP is refused unless explicitly
-overridden. For an IP-only host, use a self-signed certificate and trust it
-once in the browser (or put the console behind a CA-issued TLS proxy).
+A password-protected, CSRF-protected operator dashboard on :9443. The backend
+provides device cards, search/filter, pending approvals, grouped
+command pages, recent history, flood-cap settings and Remove Device without a
+second confirmation, with token redaction, CSP, request limits and stream
+tokens. Native HTTPS is available with `--certfile`/`--keyfile`; non-loopback
+HTTP is refused unless explicitly overridden. For an IP-only host, a
+self-signed certificate is a temporary option; replace it with a CA-issued
+certificate for normal use.
+
+Known console UI gaps under active repair: device model/sidekick fields do not
+populate because the daemon does not persist them, live-screen start/polling is
+not wired through, and upload cancellation plus download progress/abort are
+incomplete. Backend API tests do not prove those browser workflows.
 
 The CSRF token is scoped to the running console process. After a console
 restart (or an HTTP-to-HTTPS switch), reload the login/page once; posting from
 an old tab can show `CSRF check failed` even though the password is correct.
+`Origin: null` is rejected even with a valid token.
 
 The current Kali deployment is HTTPS-only on :9443 with a self-signed
 certificate for its IP. External TLS and an authenticated CSRF-protected POST
 were verified; plain HTTP to that port is rejected. Trust the certificate once
-in the browser (or replace it with a CA-issued certificate).
+in the browser temporarily, and replace it with a CA-issued certificate before
+treating the console as production-ready.
 
 ---
 
@@ -201,7 +208,8 @@ moves; do not rely on old chat history for repository state.
 - `client-sidekick`: `gradle test` (115 unit tests — command router, tree,
   consent, link, unlock and removal state machines).
 - `server`: `python3 -m py_compile daemon.py ghostctl.py console.py e2e_test.py`
-  and 249 unit tests pass, including native TLS wrapping and CSRF-origin tests.
+  and 254 unit tests pass, including real TLS handshake, worker-thread
+  handshake isolation, startup validation and CSRF-origin tests.
 - Release builds pass. On the emulator, full E2E is 29/29 and unlock,
   per-capture consent, reboot recovery and two-app removal pass.
 
@@ -211,12 +219,14 @@ moves; do not rely on old chat history for repository state.
   blocked by Play Protect verification. Fleet OTA is not ready; do not bypass
   Play Protect.
 - **Transport:** the console runs native HTTPS on Kali, but with a self-signed
-  IP certificate; swap in a CA-issued certificate and rotate credentials after
-  deployment. Device transport still needs TLS/WSS.
+  IP certificate; deploy the hardened TLS backend, swap in a CA-issued
+  certificate and rotate credentials. Device transport still needs WSS/TLS.
+- **Console UI:** model/sidekick metadata, live-screen polling, upload cancel
+  and download progress/abort still need browser fixes and a phone-sized review.
 - **Hardening:** older camera/mic resource ownership, endpoint cache/reconnect,
   localhost peer authentication and approved-device pagination/caps.
 - **Features:** SMS send, contacts, call-log readers and WhatsApp export are
-  not implemented. A real phone-sized console review is pending.
+  not implemented.
 
 ## Repository layout
 

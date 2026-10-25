@@ -91,8 +91,16 @@ openssl req -x509 -newkey rsa:2048 -sha256 -nodes -days 825 \
   -subj "/CN=203.0.113.10" \
   -addext "subjectAltName=IP:203.0.113.10"
 chmod 600 console.key
-python3 console.py --host 0.0.0.0 --certfile console.crt --keyfile console.key
+GHOST_CONSOLE_PASS=... python3 console.py --host 0.0.0.0 \
+  --certfile console.crt --keyfile console.key
 ```
+
+Non-loopback binds require `GHOST_CONSOLE_PASS`; the generated
+`console.pass` path is loopback-only. TLS startup validates the certificate and
+key before generating a password or binding, rejects a group/world-readable
+key, and performs handshakes in worker threads so an idle TCP client cannot
+block new connections.
+
 Stdlib-only (http.server), server-rendered HTML, no CDNs — works offline.
 Talks to the daemon by importing `ghostctl` and reusing its authenticated
 `rpc()` (admin port, env `GHOSTCTL_ADMIN_HOST/PORT`). Bounded, redacted command
@@ -104,23 +112,31 @@ history is fetched through the daemon's `history` admin operation.
   `curl -u ghost:<pass>`). CSRF protection covers state-changing routes.
   Tokens, PINs and passwords are redacted from history and logs. CSRF tokens
   rotate with the console process; reload the page once after a restart or an
-  HTTP-to-HTTPS switch so an old tab does not post a stale token.
+  HTTP-to-HTTPS switch so an old tab does not post a stale token. `Origin:
+  null` is rejected even with a valid token; only scheme-correct origins are
+  accepted.
 - Binding: `127.0.0.1` by default. Native HTTPS uses
-  `--certfile`/`--keyfile` (TLS 1.2+) and avoids the HTTP override. Non-loopback
-  HTTP is refused unless `GHOST_CONSOLE_ALLOW_HTTP=1` is explicitly set; do not
-  use that override for normal remote access. Only open the firewall when
-  needed (`sudo ufw allow 9443/tcp`).
+  `--certfile`/`--keyfile` (TLS 1.2+), worker-thread handshakes with a bounded
+  timeout, a mode-600 key check, a `Secure` CSRF cookie and HSTS. It avoids the
+  HTTP override. Non-loopback HTTP is refused unless
+  `GHOST_CONSOLE_ALLOW_HTTP=1` is explicitly set; do not use that override for
+  normal remote access. Only open the firewall when needed
+  (`sudo ufw allow 9443/tcp`).
 - Pages:
   - `/` dashboard with device cards, search/filter and pending approvals.
+    Model/sidekick metadata currently falls back to `-` because the daemon
+    does not persist those hello fields.
   - `/device/<id>` grouped Files, Screen, UI, Media and System actions plus
     recent history. PIN entry is intentionally CLI-only. Restart/update/revoke
     use confirmations; the explicit Remove Device action needs no second
     confirmation and uninstalls both apps without deleting personal data.
   - `/broadcast` — restricted to safe read/stop verbs.
-  - `/stream/<id>` — live view with explicit start/stop and frame-age health;
-    feed URLs include an unguessable stream token.
+  - `/stream/<id>` — live view markup and tokenized feeds; browser start/poll
+    wiring is a known UI gap under repair.
   - `/settings` — flood-cap editing.
-  - File upload/download with progress/error reporting and abort support.
+  - Upload backend and abort RPC exist. Browser cancellation and
+    download-progress/abort UI are known gaps under repair; do not claim those
+    workflows as verified yet.
 - POST `/device/<id>/cmd` runs a device action and renders a bounded result.
   The console `update` action uses the daemon's complete APK-push flow.
 

