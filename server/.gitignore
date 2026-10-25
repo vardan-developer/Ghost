@@ -3,3 +3,5 @@ state.json
 history.json
 *.tmp
 __pycache__/
+# APK store for `update` pushes — never commit binaries
+apks/
