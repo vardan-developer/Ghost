@@ -47,11 +47,11 @@ Last updated: 2026-10-26.
    validation before password generation, key-permission check, HSTS/Secure
    cookie, `Origin: null` rejection). Rebuild/restart Kali, then re-verify
    external TLS and an authenticated CSRF POST.
-5. Finish the separately owned console UI fixes: populate device
-   model/sidekick fields from daemon state or remove those claims, wire live
-   screen start/polling, make upload Cancel send URL-encoded abort data, and
-   implement or remove download progress/abort. Review on a phone-sized
-   browser.
+5. Finish the remaining console UI fixes: populate device model/sidekick
+   fields from daemon state and wire live screen start/polling. The isolated
+   UI branch now sends URL-encoded upload cancellation and accurately leaves
+   download progress to the browser; it still needs integration/deployment.
+   Review on a real phone browser.
 6. Add approved-device pagination/output caps to admin list/pending paths and
    finish endpoint-cache/reconnect hardening.
 7. Replace the console's self-signed IP certificate with a CA-issued one and
@@ -425,6 +425,57 @@ do not bypass Play Protect or treat these tests as a successful self-update.
 - Consider accessibility-based low-rate live frames only after still capture
   and current live projection are stable. Do not promise invisible live capture.
 
+## Console UI checkpoint — isolated branch, not deployed (2026-10-26)
+
+- Branch: `codex/console-visuals`, created from committed `main` in the managed
+  `console-visuals` worktree. UI development stops at the user's requested
+  integration checkpoint. Main commit `e9a8397` is merged into this branch;
+  the original main checkout and its uncommitted work remain untouched.
+- Angular dark/red styling, IBM Plex Mono and Lucide icons are bundled into
+  existing UI assets, with source/license attribution in `server/ui_assets/`.
+  No external asset requests, new asset routes or CSP changes are required.
+- Phone layouts collapse tool selection, secondary device information and
+  subgroups. Related controls share subgroups; simple actions appear once.
+  Desktop uses a sidebar, while phones use bottom navigation.
+- Device commands (including System → Terminal shell commands) use the existing
+  URL-encoded endpoint/CSRF fields and display results on the same page as
+  readable fields, text or tables. Raw JSON is collapsed under Technical details.
+  Includes elapsed/pending, failure and duplicate-submit handling. Nothing is
+  retried automatically. Without JS, forms retain the normal result-page fallback.
+- The file explorer lists folders via existing `files ls`, with breadcrumbs,
+  folder/parent navigation, local filtering and per-file attachment downloads.
+  The duplicate List directory action is removed. Recursive tree/recovery tools,
+  upload and exact-path downloads stay in collapsed sections.
+- Upload results remain inline; cancellation now sends URL-encoded abort data.
+  Upload progress distinguishes bytes sent to the console from device completion.
+  Download progress belongs to the browser; no in-page progress/abort is claimed.
+- Full PWA support remains explicitly deferred. No manifest, service worker or
+  offline caching was added. Preview/test data is synthetic; no Kali account,
+  enrollment, physical-device access or deployment was needed.
+- Pre-integration verification: 83 console/UI Python tests and 42 browser layout
+  checks pass, along with inline success/error/CSRF/network states, confirmations,
+  duplicate-submit prevention, folder navigation/filter/download URLs, upload/
+  cancellation contracts, no-JS fallback, and font loading under the production
+  CSP. Browser tests are reproducible with `server/test_console_ui_browser.cjs`
+  using an installed Playwright + Chrome. Real-phone Safari remains untested.
+- Known limits: this server splits folder-list command arguments at spaces;
+  the explorer explains this and preserves the prior listing. Exact-path
+  downloads still accept spaces. Device model/sidekick persistence and live-screen
+  polling/start remain unresolved. No Android or backend logic was authored in
+  this UI change; backend updates come only from merging main.
+- Post-merge verification: all 264 server unit tests pass, the browser suite
+  passes 42 responsive layouts plus the interaction checks above, and server
+  Python compilation/diff checks pass. Main `e9a8397` was integrated by merge
+  commit `c6f3b9b`; no code conflicts required changes.
+- Follow-up merge: main/origin-main `1454236` (device WSS pinning and bearer
+  token rotation) is integrated by merge commit `d6b8037`, without conflicts.
+  Post-merge checks pass: 282 server unit tests, 42 browser layout checks plus
+  interaction regressions, Python compilation and diff checks. No additional
+  UI development. Android builds/tests and on-device E2E were not rerun for
+  this merge; no deployment or push was performed.
+- UI development is stopped at this clean checkpoint. Not pushed or deployed.
+  The other agent's uncommitted Android/server work was not included or touched.
+
 ## Web console — backend deployed, UI fixes pending
 
 Kali serves the console HTTPS-only and returns HTTP 200 over TLS; external TLS
@@ -443,8 +494,9 @@ The HTTP backend is implemented; the browser UI is not fully verified:
   daemon does not persist those hello fields.
 - The live-screen page does not start polling, and its Start action posts to a
   result page instead of a usable live view.
-- Upload Cancel posts multipart data to `/files/abort`, which expects
-  URL-encoded data. Download progress/abort is not implemented.
+- The isolated UI branch fixes Upload Cancel to use URL-encoded data for
+  `/files/abort`; that source/browser-verified change is not deployed.
+  In-page download progress/abort is not implemented or claimed in the UI.
 - A real phone-sized browser and accessibility review remains.
 
 Working backend/browser pieces:
