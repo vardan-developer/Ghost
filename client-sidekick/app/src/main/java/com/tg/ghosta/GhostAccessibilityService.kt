@@ -34,6 +34,7 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
             "ok",
             "okay",
             "start now",
+            "start",
             "start recording",
             "install",
             "install anyway",
