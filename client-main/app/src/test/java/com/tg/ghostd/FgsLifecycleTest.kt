@@ -83,6 +83,8 @@ class FgsLifecycleTest {
             names += (permissions.item(i) as Element).getAttributeNS(androidNs, "name")
         }
         assertTrue(names.contains("android.permission.FOREGROUND_SERVICE_SPECIAL_USE"))
+        assertTrue(names.contains("android.permission.FOREGROUND_SERVICE_CAMERA"))
+        assertTrue(names.contains("android.permission.FOREGROUND_SERVICE_MICROPHONE"))
         assertFalse(names.contains("android.permission.FOREGROUND_SERVICE_DATA_SYNC"))
     }
 
@@ -100,6 +102,13 @@ class FgsLifecycleTest {
         // API 34+: specialUse | mediaProjection.
         assertEquals(0x40000020, GhostService.projectionForegroundServiceType(34))
         assertEquals(0x40000020, GhostService.projectionForegroundServiceType(36))
+    }
+
+    @Test fun cameraAndMicrophonePromotionKeepsBaseOn34Plus() {
+        assertEquals(0x40, GhostService.cameraForegroundServiceType(29))
+        assertEquals(0x80, GhostService.microphoneForegroundServiceType(29))
+        assertEquals(0x40000040, GhostService.cameraForegroundServiceType(34))
+        assertEquals(0x40000080, GhostService.microphoneForegroundServiceType(34))
     }
 
     @Test fun api34TimeoutOverloadDelegatesToSameTeardown() {

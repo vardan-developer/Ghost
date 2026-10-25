@@ -36,6 +36,9 @@ object CameraCapturer {
             != PackageManager.PERMISSION_GRANTED
         ) throw Exception("camera permission not granted")
         MediaBus.begin(MediaBus.SOURCE_CAM, ctx, null)
+        GhostService.instance?.promoteToCamera()
+        var readerToClose: ImageReader? = null
+        var sessionToClose: CameraCaptureSession? = null
         val ht = HandlerThread("ghostd-camsnap").apply { start() }
         val handler = Handler(ht.looper)
         try {
@@ -44,6 +47,7 @@ object CameraCapturer {
             val preset = QualityPresets.get("high")
             val size = pickJpegSize(chars, preset)
             val reader = ImageReader.newInstance(size.width, size.height, android.graphics.ImageFormat.JPEG, 2)
+            readerToClose = reader
             val frames = LinkedBlockingQueue<ByteArray>()
             reader.setOnImageAvailableListener({ r ->
                 try {
@@ -81,6 +85,7 @@ object CameraCapturer {
                     listOf(reader.surface),
                     object : CameraCaptureSession.StateCallback() {
                         override fun onConfigured(s: CameraCaptureSession) {
+                            sessionToClose = s
                             try {
                                 val req = dev.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
                                     .apply {
@@ -114,8 +119,11 @@ object CameraCapturer {
                 }
             }
         } finally {
+            try { sessionToClose?.close() } catch (_: Exception) {}
+            try { readerToClose?.close() } catch (_: Exception) {}
             ht.quitSafely()
             MediaBus.end(MediaBus.SOURCE_CAM)
+            GhostService.instance?.restoreAfterCapture()
         }
     }
 
@@ -131,6 +139,7 @@ object CameraCapturer {
             != PackageManager.PERMISSION_GRANTED
         ) throw Exception("camera permission not granted")
         MediaBus.begin(MediaBus.SOURCE_CAM, ctx, ws)
+        GhostService.instance?.promoteToCamera()
         stopRequested = false
         val preset = QualityPresets.get(quality)
         val streamName = "cam-live"
@@ -143,6 +152,7 @@ object CameraCapturer {
             } finally {
                 ht.quitSafely()
                 MediaBus.end(MediaBus.SOURCE_CAM)
+                GhostService.instance?.restoreAfterCapture()
             }
         }.apply { name = "ghostd-camlive"; start() }
         return JSONObject()
@@ -192,13 +202,17 @@ object CameraCapturer {
         }, handler)
 
         val opened = CountDownLatch(1)
+        var device: CameraDevice? = null
+        var session: CameraCaptureSession? = null
         cm.openCamera(id, object : CameraDevice.StateCallback() {
             override fun onOpened(d: CameraDevice) {
+                device = d
                 try {
                     d.createCaptureSession(
                         listOf(reader.surface),
                         object : CameraCaptureSession.StateCallback() {
                             override fun onConfigured(s: CameraCaptureSession) {
+                                session = s
                                 try {
                                     val req = d.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
                                         .apply {
@@ -251,6 +265,8 @@ object CameraCapturer {
             }
         }
         MediaBus.streamEnd(streamName, sent, if (sent > 0) "stopped" else "camera error")
+        try { session?.close() } catch (_: Exception) {}
+        try { device?.close() } catch (_: Exception) {}
         reader.close()
     }
 

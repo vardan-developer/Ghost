@@ -40,6 +40,7 @@ object MicCapturer {
         ) throw Exception("microphone permission not granted")
         val dur = secs.coerceIn(1, RECORD_MAX_SECS)
         MediaBus.begin(MediaBus.SOURCE_MIC, ctx, null)
+        GhostService.instance?.promoteToMicrophone()
         try {
             val minBuf = AudioRecord.getMinBufferSize(
                 rate,
@@ -94,6 +95,7 @@ object MicCapturer {
                 .put("wav_b64", Base64.encodeToString(pcm.toByteArray(), Base64.NO_WRAP))
         } finally {
             MediaBus.end(MediaBus.SOURCE_MIC)
+            GhostService.instance?.restoreAfterCapture()
         }
     }
 
@@ -109,6 +111,7 @@ object MicCapturer {
             != PackageManager.PERMISSION_GRANTED
         ) throw Exception("microphone permission not granted")
         MediaBus.begin(MediaBus.SOURCE_MIC, ctx, ws)
+        GhostService.instance?.promoteToMicrophone()
         stopRequested = false
         val streamName = "mic-live"
         val t = Thread {
@@ -117,6 +120,7 @@ object MicCapturer {
             } catch (_: Exception) {
             } finally {
                 MediaBus.end(MediaBus.SOURCE_MIC)
+                GhostService.instance?.restoreAfterCapture()
             }
         }.apply { name = "ghostd-miclive"; start() }
         return JSONObject()

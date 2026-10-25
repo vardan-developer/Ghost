@@ -133,6 +133,38 @@ class GhostService : Service() {
         }
     }
 
+    /** Camera access requires its own foreground type on Android 14+. */
+    fun promoteToCamera() {
+        if (Build.VERSION.SDK_INT >= 29) {
+            try {
+                startForeground(NOTIFICATION_ID, buildNotification(),
+                    cameraForegroundServiceType(Build.VERSION.SDK_INT))
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /** Microphone access requires its own foreground type on Android 14+. */
+    fun promoteToMicrophone() {
+        if (Build.VERSION.SDK_INT >= 29) {
+            try {
+                startForeground(NOTIFICATION_ID, buildNotification(),
+                    microphoneForegroundServiceType(Build.VERSION.SDK_INT))
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /** Restore the correct type after any one capture source ends. */
+    fun restoreAfterCapture() {
+        when {
+            ProjectionHub.hasProjection() -> promoteToProjection()
+            MediaBus.isActive(MediaBus.SOURCE_CAM) -> promoteToCamera()
+            MediaBus.isActive(MediaBus.SOURCE_MIC) -> promoteToMicrophone()
+            else -> demoteToBase()
+        }
+    }
+
     /** Restore the base type after the per-capture projection is released. */
     fun demoteToBase() {
         if (Build.VERSION.SDK_INT >= 29) {
@@ -465,6 +497,22 @@ class GhostService : Service() {
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
             } else {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            }
+
+        internal fun cameraForegroundServiceType(sdk: Int): Int =
+            if (sdk >= 34) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+            }
+
+        internal fun microphoneForegroundServiceType(sdk: Int): Int =
+            if (sdk >= 34) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             }
 
         /**
