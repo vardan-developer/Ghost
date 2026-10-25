@@ -40,7 +40,14 @@ class GhostService : Service() {
         // Auto-arm the sidekick once the link is up (after setup); the
         // sidekick resets armed state on reboot, so ghostd re-arms on every
         // (re)connect. Fire-and-forget, retried by the link watcher.
-        if (Prefs.setupDone(this)) SidekickLink.startAutoArm()
+        if (Prefs.setupDone(this)) {
+            SidekickLink.startAutoArm()
+            // ghostd update / reboot / sidekick wiped: re-check ghosta
+            // presence and re-provision from the bundled asset when missing
+            // or older than the bundle (silent when ghostd is the
+            // installer-of-record). Fire-and-forget, never blocks the WS.
+            SidekickInstaller.provisionBundledAsync(this, "service-start")
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

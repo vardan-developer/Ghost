@@ -157,3 +157,4 @@ projects/ghostctl/
 4. Screen capture + night-control flow (brightness 0, PIN entry).
 5. Server core + CLI + web console; silent updates; auto-destroy.
 6. Field test on iQOO Z5 (Android 13).
+ghostd 0.2.1+ self-provisions the ghosta sidekick from the bundled asset (client-main/app/src/main/assets/ghosta.apk, refresh via `gradle -p client-main refreshSidekickAsset`).

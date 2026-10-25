@@ -311,9 +311,13 @@ object CommandHandler {
     }
 
     /**
-     * sidekick status | arm | disarm | ping | install [apk]
-     * install: installs a previously-pushed ghosta APK (see SidekickInstaller
-     * for the confirm+auto-tap flow).
+     * sidekick status | arm | disarm | ping | install [apk] | reinstall
+     * install:   installs a previously-pushed ghosta APK (see SidekickInstaller
+     *            for the confirm+auto-tap flow).
+     * reinstall: redoes the BUNDLED-asset install (assets/ghosta.apk) —
+     *            silent when ghostd is ghosta's installer-of-record, else the
+     *            confirm+auto-tap (armed sidekick) flow. Use after ghostd
+     *            updates if ghosta went missing / lagged behind.
      */
     private fun sidekickCmd(ctx: Context, args: JSONArray): Any {
         return when (args.optString(0, "status")) {
@@ -325,7 +329,10 @@ object CommandHandler {
                 ctx,
                 if (args.length() > 1) args.optString(1) else SidekickInstaller.DEFAULT_APK_PATH
             )
-            else -> throw Exception("sidekick: expected status|arm|disarm|ping|install [apk]")
+            "reinstall" -> SidekickInstaller.provisionBundled(ctx, force = true)
+            else -> throw Exception(
+                "sidekick: expected status|arm|disarm|ping|install [apk]|reinstall"
+            )
         }
     }
 
