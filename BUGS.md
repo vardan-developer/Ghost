@@ -1902,9 +1902,9 @@ unchanged. **Source fixes and unit tests are not device/deployment proof.**
   enrollment, connection ownership, pending cleanup, bounded history,
   authenticated/redacted admin operations, stream TTL/caps, broadcast results,
   CSRF/XSS/request limits, responsive console workflows, and file/device removal.
-- Local verification at this addendum: **247 server tests, 153 ghostd tests and
-  115 ghosta tests pass; both release builds pass.** The current Kali deployment
-  and the new emulator builds have not yet been updated or run through full E2E.
+- Local verification at this addendum: **247 server tests, 154 ghostd tests and
+  115 ghosta tests pass; both release builds pass.** Kali is updated and the
+  emulator reports 29/29 plus unlock, consent, reboot and removal passes.
 
 Still open or deployment-dependent: device-transport TLS and credential
 rotation, production file/directory permissions and TLS termination, approved-

@@ -6,6 +6,7 @@
          granted at install, invisible to the user. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
 
     <!-- Owner-setup capability for the decommission path ONLY. After ghostd is
          removed this accessibility service must open its own system uninstall

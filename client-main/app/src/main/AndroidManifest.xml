@@ -14,6 +14,7 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
     <!-- Allows eligible owner-approved self/sidekick updates to proceed without
          an additional package-installer prompt on API 31+. Eligibility still
          depends on signatures, target SDK and installer/update ownership. -->
@@ -64,6 +65,14 @@
         <activity
             android:name=".MainActivity"
             android:exported="true" />
+
+        <!-- Owner-requested unlock: displays Android's own keyguard UI. -->
+        <activity
+            android:name=".UnlockActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <!-- Invisible helper: pops the MediaProjection consent dialog, then
              finishes. Translucent so nothing is visible on screen. -->

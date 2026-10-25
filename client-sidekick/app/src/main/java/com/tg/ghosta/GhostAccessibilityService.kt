@@ -41,12 +41,13 @@ object UnlockPolicy {
         "com.android.systemui",
         "com.google.android.systemui",
         "com.android.keyguard",
+        "com.android.settings",
         "android"
     )
 
     private val KEYGUARD_CLASS_MARKERS = listOf(
         "keyguard", "bouncer", "lockscreen", "pinview", "passwordview",
-        "confirmdevicecredentials", "simunlock"
+        "confirmdevicecredential", "confirmdevicecredentials", "simunlock"
     )
 
     /** Exact affirmative labels for a keyguard submit/enter control. */
@@ -660,8 +661,15 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
                 return@synchronized UnlockPolicy.unlockedResult(alreadyUnlocked = true)
             }
             reveals++
-            swipeUpFromBottom()
-            steps.add("swipe_up")
+            if (reveals == 1) {
+                swipeUpFromBottom()
+                steps.add("swipe_up")
+            } else {
+                // Pixel/Android's secure lock screen exposes PIN entry through
+                // the Menu key on builds where the cover-screen swipe is ignored.
+                sendKey(KeyEvent.KEYCODE_MENU, 0)
+                steps.add("menu")
+            }
             SystemClock.sleep(REVEAL_DELAY_MS)
             surface = keyguardSurface(km)
         }
@@ -674,7 +682,7 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
             }
             return@synchronized UnlockPolicy.failure(
                 "reveal",
-                "could not reveal the keyguard PIN/password entry after $reveals swipe " +
+                "could not reveal the keyguard PIN/password entry after $reveals swipe/Menu " +
                     "attempts; the lock screen may use a different unlock method or block " +
                     "accessibility input. Unlock the phone manually, then retry",
                 steps = steps
@@ -1068,9 +1076,11 @@ class GhostAccessibilityService : AccessibilityService(), UiDriver {
         val w = metrics.widthPixels
         val h = metrics.heightPixels
         val path = Path()
-        path.moveTo(w / 2f, h * 0.85f)
-        path.lineTo(w / 2f, h * 0.25f)
-        val stroke = GestureDescription.StrokeDescription(path, 0, 250)
+        path.moveTo(w / 2f, h * 0.94f)
+        path.lineTo(w / 2f, h * 0.10f)
+        // A short, fast cover-screen fling is required on Pixel builds; the
+        // slower drag used by generic scrolling can be ignored by keyguard.
+        val stroke = GestureDescription.StrokeDescription(path, 0, 50)
         return dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
     }
 

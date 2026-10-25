@@ -2,6 +2,7 @@ package com.tg.ghostd
 
 import android.app.KeyguardManager
 import android.content.Context
+import android.content.Intent
 import android.os.PowerManager
 import android.os.SystemClock
 import com.neovisionaries.ws.client.WebSocket
@@ -516,6 +517,18 @@ object CommandHandler {
                 .put("typed", false)
         }
 
+        // Ask Android to present its own keyguard entry instead of relying on
+        // OEM-specific cover-screen gestures. ghosta still performs the actual
+        // owner-authorized PIN entry and verifies the result.
+        try {
+            ctx.startActivity(
+                Intent(ctx, UnlockActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        } catch (_: Exception) {
+            // ghosta's bounded swipe/Menu fallbacks remain available.
+        }
+        Thread.sleep(300)
         val res = sidekickSend(JSONObject().put("cmd", "unlock").put("pin", pin))
         if (!res.optBoolean("ok", false)) {
             // Do not report a failure if the keyguard actually cleared while

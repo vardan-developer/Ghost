@@ -285,7 +285,14 @@ object ProjectionHub {
                 wakeForConsent(ctx)
                 if (!isCancelled()) {
                     try {
-                        CommandHandler.unlockWithStoredPin(ctx)
+                        val result = CommandHandler.unlockWithStoredPin(ctx)
+                        if (!result.optBoolean("ok", false)) {
+                            android.util.Log.w(
+                                "ghostd",
+                                "stored unlock failed: ${result.optString("stage")} " +
+                                    result.optString("error")
+                            )
+                        }
                     } catch (_: Exception) {
                         // Reported below as "still locked", with an action.
                     }

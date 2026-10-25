@@ -136,6 +136,19 @@ class FgsLifecycleTest {
         GhostService::class.java.getDeclaredMethod("demoteToBase")
     }
 
+    @Test fun keyguardActivityIsPrivateAndDeclared() {
+        val activities = manifestElement().getElementsByTagName("activity")
+        var found = false
+        for (i in 0 until activities.length) {
+            val el = activities.item(i) as Element
+            if (el.getAttributeNS(androidNs, "name") == ".UnlockActivity") {
+                found = true
+                assertEquals("false", el.getAttributeNS(androidNs, "exported"))
+            }
+        }
+        assertTrue(found)
+    }
+
     @Test fun helloCarriesNumericVersionCode() {
         val msg = JSONObject(
             GhostService.buildHelloMessage(

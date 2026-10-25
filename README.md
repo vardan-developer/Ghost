@@ -179,14 +179,16 @@ moves; do not rely on old chat history for repository state.
 
 ## Testing
 
-- `client-main`: `gradle test` (153 JVM unit tests — protocol, transfer,
+- `client-main`: `gradle test` (154 JVM unit tests — protocol, transfer,
   lifecycle, consent, update and wake-session behavior).
 - `client-sidekick`: `gradle test` (115 unit tests — command router, tree,
   consent, link, unlock and removal state machines).
 - `server`: `python3 -m py_compile daemon.py ghostctl.py console.py e2e_test.py`
   and 247 unit tests pass.
-- Release builds for both apps pass. Emulator basic command and accessibility
-  screenshot path works. Full on-device e2e with the new builds is pending.
+- Release builds pass. On the emulator, full E2E is 29/29 and unlock,
+  per-capture consent, reboot recovery and two-app removal pass. OTA has a
+  platform limitation: ghostd self-update was blocked by Play Protect
+  verification; do not bypass it.
 
 ## Repository layout
 

@@ -574,7 +574,11 @@ object Decommission {
             return false
         }
         return try {
-            ctx.startActivity(uninstallIntent(DecommissionPolicy.GHOSTA_PACKAGE))
+            android.app.PendingIntent.getActivity(
+                ctx, 0, uninstallIntent(DecommissionPolicy.GHOSTA_PACKAGE),
+                android.app.PendingIntent.FLAG_IMMUTABLE or
+                    android.app.PendingIntent.FLAG_UPDATE_CURRENT
+            ).send()
             true
         } catch (e: Exception) {
             // No secrets here: only the package and the platform message.

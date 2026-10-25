@@ -10,9 +10,12 @@ Last updated: 2026-10-26.
 
 - Physical test phone: **Pixel 10a**, approved and controllable. It must remain untouched during current local/emulator work.
 - Phone currently reports **ghostd 0.3.8**. Working tree is **ghostd 0.4.1 / ghosta 0.2.1**.
-- **Local full verification now passes:** 247 server unit tests + `py_compile`, 153 ghostd unit tests, 115 ghosta unit tests, and release builds.
-- **Emulator:** Initial 0.3.9/0.1.9 build installed; basic command and accessibility screenshot path passed. Current 0.4.1/0.2.1 builds are not yet installed or device-e2e tested.
-- **Kali server:** Not yet updated or restarted.
+- **Local full verification now passes:** 247 server unit tests + `py_compile`, 154 ghostd unit tests, 115 ghosta unit tests, and release builds.
+- **Emulator:** Runs 0.4.1/0.2.1. Full E2E is **29/29 ALL GREEN**. Stored-PIN
+  unlock, locked-screen consent, fresh grants, reboot recovery and two-app
+  Remove Device also passed. The emulator was restored to an approved,
+  working state after the removal test.
+- **Kali server:** Updated and daemon/console restarted successfully.
 - The original e2e run passed 17/22 checks. Failures were:
   - incorrect test invocation for volume (test fixed to `volume set media N`);
   - interrupted/wedged file push and dependent file get;
@@ -30,14 +33,19 @@ Last updated: 2026-10-26.
 - Device rename works in daemon, CLI and console. `-d` accepts a full ID, an
   unambiguous ID prefix, or a device name.
 
-## Immediate next steps — do these before new features
+## Immediate next steps — remaining hardening
 
-1. Review all current source changes and ensure no runtime logs or secrets are staged.
-2. Push to GitHub (user handles unless explicitly asked), then pull and restart on Kali.
-3. Install the new current builds on the emulator and verify the basic command and screenshot paths.
-4. Run the full device e2e suite against the emulator or when the Pixel is explicitly cleared for use. Record results here.
-5. Verify the implemented consent-per-capture behavior on the emulator with
-   locked and unlocked states. Do not keep a persistent projection.
+1. Preserve the verified 29/29 emulator result; rerun after any capture/link
+   lifecycle change.
+2. Finish the camera/mic resource-ownership audit below (close every session,
+   reader and worker on stop/timeout).
+3. Replace localhost shared-secret-only peer trust with LocalSocket + peer UID
+   and package-signature validation without breaking partial upgrades.
+4. Deploy device-transport TLS before changing clients to `wss://`; rotate
+   exposed credentials afterward.
+5. OTA limitation is verified: ghosta installed but its command timed out;
+   ghostd self-update was blocked by Play Protect verification. Do not bypass
+   that protection or claim unattended fleet OTA is ready.
 
 ## P0 — correctness / recovery bugs
 
@@ -303,13 +311,9 @@ See the unattended-update audit below before claiming fleet readiness.
 Focused review of file-transfer plumbing, command results and test entry points;
 details and verification limits are in the final review section of `BUGS.md`.
 
-- **P1: Downloads are discarded.** `daemon.py:on_device_binary` ignores
-  `file_chunk`, and its text handler ignores `file_start`/`file_end`.
-  `FileTransfer.sendFile` returns metadata only, so `files get` reports success
-  without delivering file contents to the operator.
-- **P1: CLI uploads never stream.** `ghostctl.py` passes `files put` through as
-  a plain command; it never reads the source or invokes `Daemon.push_file`.
-  The current e2e upload therefore cannot complete even with a healthy receiver.
+- **Downloads and CLI uploads — fixed and emulator-verified.** Device chunks
+  and ends are `cmd_id`-bound; the daemon validates path, sequence, counts and
+  SHA-256, and both put/get passed with byte and hash comparison.
 - **Shell deadlock — source fix present, not retested in this review:** stdout
   and stderr now drain separately and execution/output are bounded.
 - **Failed operation envelopes — source fix present, not device-tested:**
@@ -327,7 +331,7 @@ synthetic download chunk; the hardcoded e2e directory was confirmed absent.
 Android findings are static code findings; no device commands or deployment
 were performed and Android tests were not rerun.
 
-### Unattended-update audit — 2026-10-25 (source addressed; emulator verification pending)
+### Unattended-update audit — source fixes; Play Protect limitation verified
 
 **User-reported idle disconnect — diagnosis pending:** the phone sometimes
 appears to stop the service after sleeping. This is an observed loss of
@@ -344,7 +348,8 @@ screen-off disconnect without timing/log evidence. No phone state was inspected
 or changed for this symptom report.
 
 **Verdict: eligible unattended installs are supported by the current source,
-but reliable end-to-end automatic updates are not verified or release-ready.**
+but reliable end-to-end automatic updates are not release-ready. Emulator OTA
+installed ghosta after a timeout, while ghostd was blocked by Play Protect.**
 The permission in a new APK does not retroactively grant it to the old
 installer process; the transition from an older installation may still need
 one owner-confirmed update. Android can require user action when eligibility
@@ -409,7 +414,7 @@ to start new fleet features during release stabilization.
 - Consider accessibility-based low-rate live frames only after still capture
   and current live projection are stable. Do not promise invisible live capture.
 
-## Web console status (source implemented; device verification pending)
+## Web console status (implemented and deployed)
 
 The console has been redesigned as an operator dashboard with device cards,
 search/filter, grouped actions, settings, file management, and safe remove.
@@ -438,12 +443,12 @@ Implemented features:
 
 ## Documentation / release checklist
 
-- [ ] All current changes committed; no daemon/console logs or secrets staged.
+- [x] All current changes committed; no daemon/console logs or secrets staged.
 - [x] Unit tests and Python compile checks pass after final edits.
-- [ ] ghosta and ghostd versions staged match the tested builds.
-- [ ] Physical phone runs those versions and reconnects after update.
-- [ ] Full e2e result recorded above; negatives and skipped checks noted.
+- [x] ghosta and ghostd versions staged match the tested builds.
+- [x] Emulator runs those versions and reconnects after restart.
+- [x] Full e2e result recorded above; OTA/Play Protect limitation noted.
 - [x] README command list matches actual implemented verbs and limitations.
-- [ ] `AGENTS.md`, this backlog and `BUGS.md` updated for design/lifecycle
+- [x] `AGENTS.md`, this backlog and `BUGS.md` updated for design/lifecycle
   changes and newly confirmed audit findings.
-- [ ] User handles GitHub push unless explicitly asking the agent to push.
+- [x] User explicitly asked the agent to push; Kali pulled main successfully.
