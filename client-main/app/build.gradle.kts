@@ -44,3 +44,13 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 }
+
+dependencies {
+    // nv-websocket-client: single zero-dependency jar, works on plain JVM
+    // (no AndroidX/okio baggage) — smallest solid option for this app.
+    implementation("com.neovisionaries:nv-websocket-client:2.14")
+
+    // reference org.json for JVM unit tests (app itself uses android's)
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
+}

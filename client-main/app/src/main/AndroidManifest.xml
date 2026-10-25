@@ -36,12 +36,20 @@
 
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true" />
+
+        <!-- Launcher entry lives on an alias so MainActivity can stay enabled
+             while the icon is hidden via setComponentEnabledSetting. -->
+        <activity-alias
+            android:name=".MainAlias"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:targetActivity=".MainActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
+        </activity-alias>
 
         <service
             android:name=".GhostService"
