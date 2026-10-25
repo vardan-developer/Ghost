@@ -463,7 +463,12 @@ do not bypass Play Protect or treat these tests as a successful self-update.
   downloads still accept spaces. Device model/sidekick persistence and live-screen
   polling/start remain unresolved. No Android or backend logic was authored in
   this UI change; backend updates come only from merging main.
-- Not pushed or deployed. Post-merge checks are recorded below; no further UI development is planned in this run.
+- Post-merge verification: all 264 server unit tests pass, the browser suite
+  passes 42 responsive layouts plus the interaction checks above, and server
+  Python compilation/diff checks pass. Main `e9a8397` was integrated by merge
+  commit `c6f3b9b`; no code conflicts required changes.
+- UI development is stopped at this clean checkpoint. Not pushed or deployed.
+  The other agent's uncommitted Android/server work was not included or touched.
 
 ## Web console — backend deployed, UI fixes pending
 
