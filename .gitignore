@@ -19,3 +19,8 @@ server/*.key
 
 # OS cruft
 .DS_Store
+
+# blockchain / foundry build artifacts
+blockchain/out/
+blockchain/cache/
+blockchain/__pycache__/
