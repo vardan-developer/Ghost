@@ -1914,8 +1914,9 @@ ghostd self-update failed verification and was not installed. Fleet OTA stays
 open; do not bypass Play Protect.
 
 Console HTTPS is implemented with TLS 1.2+ and deployed using a self-signed IP
-certificate; replace it with a CA-issued certificate before relying on browser
-trust. Still open or deployment-dependent: device-transport WSS/TLS and
+certificate. External TLS and an authenticated CSRF-protected POST passed, and
+plain HTTP on :9443 is rejected; replace the certificate with a CA-issued one
+before relying on browser trust. Still open or deployment-dependent: device-transport WSS/TLS and
 credential rotation, production file/directory permissions, approved-device
 pagination/cap hardening, the older camera/mic resource audit, endpoint
 cache/reconnect and localhost peer-authentication hardening, long-idle

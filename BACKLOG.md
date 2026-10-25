@@ -16,7 +16,8 @@ Last updated: 2026-10-26.
   Remove Device also passed. The emulator was restored to an approved,
   working state after the removal test.
 - **Kali server:** Updated. Daemon runs normally; the console runs native HTTPS
-  on :9443 with a self-signed IP certificate. Plain HTTP is no longer enabled.
+  on :9443 with a self-signed IP certificate (expires 2029-01-27). External TLS
+  and an authenticated CSRF-protected POST passed; plain HTTP is rejected.
 - The original e2e run passed 17/22 checks. Failures were:
   - incorrect test invocation for volume (test fixed to `volume set media N`);
   - interrupted/wedged file push and dependent file get;
@@ -413,8 +414,9 @@ do not bypass Play Protect or treat these tests as a successful self-update.
 ## Web console status (implemented and deployed)
 
 The console is redesigned and deployed as an operator dashboard. Kali serves
-HTTPS and returns HTTP 200 over TLS, route/API tests pass, and
-dashboard/device/settings/remove smoke checks passed. Security includes admin
+HTTPS-only and returns HTTP 200 over TLS; external TLS plus an authenticated
+CSRF-protected device command passed. Plain HTTP on :9443 is rejected. Route/API
+tests pass and dashboard/device/settings/remove smoke checks passed. Security includes admin
 auth, token redaction, HTTP Basic over TLS, CSRF (including `Origin: null` only
 with a valid token), request limits, CSP and stream tokens. Native TLS supports
 `--certfile`/`--keyfile`. Remaining: trust a CA-issued certificate instead of

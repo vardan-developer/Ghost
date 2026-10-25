@@ -135,6 +135,11 @@ The CSRF token is scoped to the running console process. After a console
 restart (or an HTTP-to-HTTPS switch), reload the login/page once; posting from
 an old tab can show `CSRF check failed` even though the password is correct.
 
+The current Kali deployment is HTTPS-only on :9443 with a self-signed
+certificate for its IP. External TLS and an authenticated CSRF-protected POST
+were verified; plain HTTP to that port is rejected. Trust the certificate once
+in the browser (or replace it with a CA-issued certificate).
+
 ---
 
 ## Building the apps

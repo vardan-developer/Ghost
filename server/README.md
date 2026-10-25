@@ -124,11 +124,12 @@ history is fetched through the daemon's `history` admin operation.
 - POST `/device/<id>/cmd` runs a device action and renders a bounded result.
   The console `update` action uses the daemon's complete APK-push flow.
 
-Current deployment: Kali runs this console over HTTPS on :9443 with a
+Current deployment: Kali runs this console HTTPS-only on :9443 with a
 self-signed certificate for its IP, so browsers require a one-time trust
-exception. Replace it with a CA-issued certificate for normal use. Device
-transport (:8443) remains `ws://` until the documented WSS migration is done;
-do not treat console HTTPS as device-transport TLS.
+exception. External TLS and an authenticated CSRF-protected POST were verified;
+plain HTTP on :9443 is rejected. Replace the certificate with a CA-issued one
+for normal use. Device transport (:8443) remains `ws://` until the documented
+WSS migration is done; do not treat console HTTPS as device-transport TLS.
 
 ## Test
 ```sh

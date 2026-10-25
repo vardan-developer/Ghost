@@ -40,7 +40,7 @@ Android permissions, indicators and owner-controlled setup.
 
 - Local full verification: 249 server unit tests + `py_compile`, 154 ghostd unit tests, and 115 ghosta unit tests pass. Release builds pass.
 - Emulator runs ghostd 0.4.1 / ghosta 0.2.1: full E2E is 29/29; locked/unlocked consent, stored-PIN unlock, reboot recovery and two-app Remove Device also passed.
-- Kali daemon and HTTPS console are updated and running. Pixel test device was not touched.
+- Kali daemon and HTTPS-only console are updated and running. External TLS and an authenticated CSRF-protected POST passed; plain HTTP on :9443 is rejected. Pixel test device was not touched.
 - OTA limitation: ghosta 0.2.1 installed but its command timed out; ghostd self-update was blocked by Play Protect verification. Do not bypass that protection.
 
 ## Remaining work (not release-verified)
